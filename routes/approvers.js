@@ -58,7 +58,7 @@ router.post("/add_role", verifyToken, async (req, res) => {
 
 router.get("/get_approvers", verifyToken, async (req, res) => {
   const updates = req.body.data;
-  console.log(req);
+  // console.log(req);
   try {
     // Check if the company exists in the Companies collection
     const company = await Company.findById(updates.company_id);
