@@ -57,24 +57,22 @@ router.post("/add_role", verifyToken, async (req, res) => {
 });
 
 router.get("/get_approvers", verifyToken, async (req, res) => {
-  const updates = req.body.data;
-  // console.log(req);
+  const { company_id } = req.body;
   try {
-    // Check if the company exists in the Companies collection
-    const company = await Company.findById(updates.company_id);
+    const company = await Company.findById(company_id);
 
     if (!company) {
       return res.status(404).json({ message: "Company not found" });
     }
 
-    let approvers = await Approvers.findOne({ company_id: updates.company_id });
+    const approvers = await Approvers.findOne({ company_id });
     return res.status(200).json({
-      message: "Approvers Saved",
-      approvers: approvers,
+      message: "Approvers fetched",
+      approvers,
     });
   } catch (err) {
     console.error(err.message);
-    res.status(500).send("Server error" + err);
+    res.status(500).json({ message: "Server error" });
   }
 });
 

@@ -7,6 +7,18 @@ const Request = require("../models/Request");
 
 const router = express.Router();
 
+// Delete employee
+router.delete("/:id", verifyToken, async (req, res) => {
+  try {
+    const employee = await Employee.findByIdAndDelete(req.params.id);
+    if (!employee) return res.status(404).json({ message: "Employee not found" });
+    return res.status(200).json({ message: "Employee removed" });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 // Update employee info
 router.post("/:id", verifyToken, async (req, res) => {
   const id = req.params.id;

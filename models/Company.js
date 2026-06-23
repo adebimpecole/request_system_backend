@@ -23,6 +23,10 @@ const CompanySchema = new mongoose.Schema({
     type: String,
     default: "admin",
   },
+  budget: {
+    type: Number,
+    default: 0,
+  },
   profile_picture: {
     type: String,
     default: "",

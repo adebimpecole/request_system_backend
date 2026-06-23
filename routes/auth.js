@@ -55,16 +55,16 @@ router.post("/company_register", async (req, res) => {
           company_code: company.company_code,
         },
       });
-    }
+    },
   );
 });
 
 // Employee Register
 router.post("/employee_register", async (req, res) => {
   const {
-    firstname,
-    lastname,
-    companyid,
+    firstName,
+    lastName,
+    companyCode,
     department,
     email,
     password,
@@ -74,7 +74,7 @@ router.post("/employee_register", async (req, res) => {
 
   // Check if employee with the given email already exists
   let employee = await Employee.findOne({ email });
-  const company = await Company.findById(companyid);
+  const company = await Company.findOne({ company_code: companyCode });
 
   if (employee) return res.status(400).send("Email already in use");
 
@@ -85,9 +85,9 @@ router.post("/employee_register", async (req, res) => {
 
   // Create a new employee
   employee = new Employee({
-    firstname,
-    lastname,
-    companyid,
+    first_name: firstName,
+    last_name: lastName,
+    company_id: company.id,
     department,
     email,
     password,
@@ -98,8 +98,6 @@ router.post("/employee_register", async (req, res) => {
   const salt = await bcrypt.genSalt(10);
   employee.password = await bcrypt.hash(password, salt);
   await employee.save();
-
-  console.log(employee.id);
 
   // Create payload and sign the JWT
   const payload = { employee: { id: employee.id } };
@@ -122,14 +120,14 @@ router.post("/employee_register", async (req, res) => {
         user: {
           id: employee.id,
           email: employee.email,
-          firstname: employee.firstname,
-          lastname: employee.lastname,
-          companyid: employee.companyid,
+          first_name: employee.firstName,
+          last_name: employee.lastName,
+          company_id: employee.companyId,
           department: employee.department,
           role: employee.role,
         },
       });
-    }
+    },
   );
 });
 
@@ -156,9 +154,8 @@ router.post("/login", async (req, res) => {
         .then((passwordCheck) => {
           // check if password matches
           if (!passwordCheck) {
-            return response.status(400).send({
+            return res.status(400).send({
               message: "Passwords does not match",
-              error,
             });
           }
 
@@ -181,14 +178,14 @@ router.post("/login", async (req, res) => {
                 user: {
                   id: employee.id,
                   email: employee.email,
-                  firstname: employee.firstname,
-                  lastname: employee.lastname,
-                  company: employee.company,
+                  first_name: employee.firstName,
+                  last_name: employee.lastName,
+                  company_id: employee.companyId,
                   department: employee.department,
                   role: employee.role,
                 },
               });
-            }
+            },
           );
         });
     } else if (company && password) {
@@ -222,12 +219,12 @@ router.post("/login", async (req, res) => {
                 token,
                 user: {
                   id: company.id,
-                  companyname: company.companyname,
+                  company_name: company.company_name,
                   email: company.email,
                   role: company.role,
                 },
               });
-            }
+            },
           );
         });
     } else {
