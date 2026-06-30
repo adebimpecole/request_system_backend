@@ -7,6 +7,8 @@ const jwt = require("jsonwebtoken");
 const Company = require("../models/Company");
 const Employee = require("../models/Employee");
 const Session = require("../models/Session");
+const Invite = require("../models/Invite");
+const BlockedUser = require("../models/BlockedUser");
 
 const router = express.Router();
 
@@ -74,14 +76,37 @@ router.post("/employee_register", async (req, res) => {
     password,
     confirm,
     role,
+    inviteToken,
   } = req.body;
 
-  let employee = await Employee.findOne({ email });
-  const company = await Company.findOne({ company_code: companyCode });
+  let resolvedEmail = email;
+  let resolvedDepartment = department;
+  let invite = null;
+
+  // If signing up via an invite link, the invite is the source of truth for
+  // email/department/company — the link can't be repurposed for another company.
+  if (inviteToken) {
+    invite = await Invite.findOne({ token: inviteToken });
+    if (!invite) return res.status(404).json({ message: "Invite not found" });
+    if (invite.usedAt) return res.status(410).json({ message: "This invite has already been used" });
+    if (invite.expiresAt < new Date()) return res.status(410).json({ message: "This invite link has expired" });
+    resolvedEmail = invite.email;
+    resolvedDepartment = invite.department || department;
+  }
+
+  let employee = await Employee.findOne({ email: resolvedEmail });
+  const company = invite
+    ? await Company.findById(invite.company_id)
+    : await Company.findOne({ company_code: companyCode });
 
   if (employee) return res.status(400).send("Email already in use");
 
   if (!company) return res.status(404).send("Company does not exist");
+
+  const blocked = await BlockedUser.findOne({ email: resolvedEmail.toLowerCase(), company_id: company.id });
+  if (blocked) {
+    return res.status(403).json({ message: "This email is not permitted to join this organization." });
+  }
 
   if (confirm !== password)
     return res.status(400).send("Passwords do not match!");
@@ -90,8 +115,8 @@ router.post("/employee_register", async (req, res) => {
     first_name: firstName,
     last_name: lastName,
     company_id: company.id,
-    department,
-    email,
+    department: resolvedDepartment,
+    email: resolvedEmail,
     password,
     role,
   });
@@ -99,6 +124,11 @@ router.post("/employee_register", async (req, res) => {
   const salt = await bcrypt.genSalt(10);
   employee.password = await bcrypt.hash(password, salt);
   await employee.save();
+
+  if (invite) {
+    invite.usedAt = new Date();
+    await invite.save();
+  }
 
   const token = signAccessToken({ employee: { id: employee.id } });
   const refreshToken = await createSession(employee.id, "employee");

@@ -96,6 +96,7 @@ router.get("/get_company/:code", async (req, res) => {
       email: employee.email,
       role: employee.role,
       department: employee.department,
+      status: employee.status || "active",
     }));
 
     const departmentDoc = await Departments.findOne({ company_id: company._id });

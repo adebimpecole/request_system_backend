@@ -57,9 +57,10 @@ router.post("/add_role", verifyToken, async (req, res) => {
   }
 });
 
-// Promote an employee to approver
+// Promote an employee to approver (or department_head — also a first-tier approver)
 router.post("/assign", verifyToken, async (req, res) => {
-  const { company_id, employee_id } = req.body;
+  const { company_id, employee_id, role } = req.body;
+  const targetRole = role === "department_head" ? "department_head" : "approver";
 
   try {
     const employee = await Employee.findOne({ _id: employee_id, company_id });
@@ -67,7 +68,7 @@ router.post("/assign", verifyToken, async (req, res) => {
       return res.status(404).json({ message: "Employee not found" });
     }
 
-    employee.role = "approver";
+    employee.role = targetRole;
     await employee.save();
 
     await Approvers.findOneAndUpdate(
