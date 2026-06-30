@@ -28,6 +28,11 @@ const EmployeeSchema = new mongoose.Schema({
     type: String,
     default: "requester",
   },
+  status: {
+    type: String,
+    enum: ["active", "suspended"],
+    default: "active",
+  },
   profile_picture: {
     type: String,
     default: "",

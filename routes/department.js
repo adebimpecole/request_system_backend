@@ -1,4 +1,5 @@
 const express = require("express");
+const mongoose = require("mongoose");
 const Company = require("../models/Company");
 const Departments = require("../models/Departments");
 const verifyToken = require("../middlewares/verifyToken");
@@ -20,7 +21,7 @@ router.post("/add_department", verifyToken, async (req, res) => {
     await Departments.findOneAndUpdate(
       { company_id: updates.company_id },
       { $set: updates },
-      { new: true, upsert: true }
+      { new: true, upsert: true },
     );
     return res.status(200).json({ message: "Department Saved" });
   } catch (err) {
@@ -32,8 +33,18 @@ router.post("/add_department", verifyToken, async (req, res) => {
 // get departments
 router.get("/get_department/:code", async (req, res) => {
   try {
-    const company_code = req.params.code;
-    const company = await Company.findOne({ company_code });
+    const { code } = req.params;
+
+    let company = null;
+
+    if (mongoose.Types.ObjectId.isValid(code)) {
+      company = await Company.findById(code);
+    }
+
+    if (!company) {
+      company = await Company.findOne({ company_code: code });
+    }
+
     if (!company) {
       return res.status(404).json({ message: "Invalid code", status: 404 });
     }
@@ -48,9 +59,10 @@ router.get("/get_department/:code", async (req, res) => {
 
     return res.status(200).json(department.departments);
   } catch (error) {
-    return res
-      .status(500)
-      .json({ message: "Internal Server Error", status: 500 });
+    return res.status(500).json({
+      message: "Internal Server Error",
+      status: 500,
+    });
   }
 });
 

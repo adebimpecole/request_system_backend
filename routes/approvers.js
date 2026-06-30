@@ -1,6 +1,7 @@
 const express = require("express");
 const Company = require("../models/Company");
 const Approvers = require("../models/Approvers");
+const Employee = require("../models/Employee");
 const verifyToken = require("../middlewares/verifyToken");
 
 const router = express.Router();
@@ -53,6 +54,60 @@ router.post("/add_role", verifyToken, async (req, res) => {
   } catch (err) {
     console.error(err.message);
     res.status(500).send("Server error" + err);
+  }
+});
+
+// Promote an employee to approver
+router.post("/assign", verifyToken, async (req, res) => {
+  const { company_id, employee_id } = req.body;
+
+  try {
+    const employee = await Employee.findOne({ _id: employee_id, company_id });
+    if (!employee) {
+      return res.status(404).json({ message: "Employee not found" });
+    }
+
+    employee.role = "approver";
+    await employee.save();
+
+    await Approvers.findOneAndUpdate(
+      { company_id },
+      { $addToSet: { approvers: { email: employee.email } } },
+      { new: true, upsert: true },
+    );
+
+    return res.status(200).json({ message: "Employee assigned as approver" });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Demote an approver back to requester
+router.post("/unassign", verifyToken, async (req, res) => {
+  const { company_id, employee_id } = req.body;
+
+  try {
+    const employee = await Employee.findOne({ _id: employee_id, company_id });
+    if (!employee) {
+      return res.status(404).json({ message: "Employee not found" });
+    }
+
+    employee.role = "requester";
+    await employee.save();
+
+    const approversDoc = await Approvers.findOne({ company_id });
+    if (approversDoc) {
+      approversDoc.approvers = approversDoc.approvers.filter((a) => a.email !== employee.email);
+      if (approversDoc.funding_authority === employee.email) approversDoc.funding_authority = "";
+      if (approversDoc.verification_authority === employee.email) approversDoc.verification_authority = "";
+      await approversDoc.save();
+    }
+
+    return res.status(200).json({ message: "Employee removed as approver" });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).json({ message: "Server error" });
   }
 });
 
