@@ -68,6 +68,21 @@ router.post("/assign", verifyToken, async (req, res) => {
       return res.status(404).json({ message: "Employee not found" });
     }
 
+    // Enforce one department head per department
+    if (targetRole === "department_head") {
+      const existing = await Employee.findOne({
+        company_id,
+        department: employee.department,
+        role: "department_head",
+        _id: { $ne: employee._id },
+      });
+      if (existing) {
+        return res.status(409).json({
+          message: `${existing.first_name} ${existing.last_name} is already the head of ${employee.department}. Unassign them first.`,
+        });
+      }
+    }
+
     employee.role = targetRole;
     await employee.save();
 

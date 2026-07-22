@@ -8,6 +8,7 @@ const Invite = require("../models/Invite");
 const verifyRole = require("../middlewares/verifyRole");
 const verifyToken = require("../middlewares/verifyToken");
 const Request = require("../models/Request");
+const { sendInviteEmail } = require("../utils/mailer");
 
 const router = express.Router();
 
@@ -44,6 +45,14 @@ router.post("/invite", verifyToken, async (req, res) => {
     });
 
     const inviteLink = `/employeesignup?invite=${token}`;
+
+    // Fire-and-forget — don't block the response on email delivery
+    sendInviteEmail({
+      to: email.toLowerCase(),
+      inviteLink,
+      companyName: company.company_name,
+      invitedByName: invited_by || null,
+    }).catch((err) => console.error("[invite email]", err.message));
 
     return res.status(200).json({ message: "Invite created", inviteLink, expiresAt });
   } catch (err) {
@@ -167,11 +176,6 @@ router.get("/requests/:id", verifyToken, async (req, res) => {
   const id = req.params.id;
   try {
     const requests = await Request.find({ user_id: id });
-
-    if (requests.length === 0) {
-      return res.status(404).json({ msg: "No request has been made" });
-    }
-
     return res.json(requests);
   } catch (err) {
     console.error(err.message);

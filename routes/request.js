@@ -1,46 +1,448 @@
 const express = require("express");
-const Company = require("../models/Company");
 const Employee = require("../models/Employee");
+const Approvers = require("../models/Approvers");
 const Request = require("../models/Request");
-const verifyToken = require("../middlewares/verifyToken"); // Assuming the middleware is in a file called 'verifyToken.js'
-const verifyRole = require("../middlewares/verifyRole");
+const verifyToken = require("../middlewares/verifyToken");
+const { notifyUser } = require("../utils/socket");
 
 const router = express.Router();
 
-// Create new request
-router.post("/new_request", verifyToken, async (req, res) => {
-  const request = req.body;
-  console.log(req.body);
-  try {
-    // Create a new request
-    const newRequest = await Request.create(request);
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-    // Send a success response with the newly created request
-    return res.status(201).json({
-      message: "Request created successfully",
-      request: newRequest,
+const getActorId = (req) => req.user?.employee?.id || null;
+
+const getApprovers = async (company_id) =>
+  Approvers.findOne({ company_id });
+
+const notifyApproversByEmail = async (company_id, emailList, payload) => {
+  const employees = await Employee.find({
+    email: { $in: emailList },
+    company_id,
+  }).select("_id");
+  for (const emp of employees) notifyUser(String(emp._id), payload);
+};
+
+// ─── Create request ───────────────────────────────────────────────────────────
+
+router.post("/new_request", verifyToken, async (req, res) => {
+  try {
+    const request = req.body;
+
+    const deptHead = await Employee.findOne({
+      company_id: request.company_id,
+      department: request.department,
+      role: "department_head",
     });
+
+    const initialIndex = deptHead ? 0 : 1;
+    const newRequest = await Request.create({ ...request, approval_index: initialIndex });
+
+    if (deptHead) {
+      notifyUser(String(deptHead._id), {
+        type: "new_request",
+        title: "New request needs your review",
+        body: `"${newRequest.title}" from your department requires your approval.`,
+        requestId: newRequest.request_id,
+        at: new Date().toISOString(),
+      });
+    } else {
+      // No dept head — go straight to funding approver
+      const approversDoc = await getApprovers(request.company_id);
+      if (approversDoc?.funding_authority) {
+        await notifyApproversByEmail(request.company_id, [approversDoc.funding_authority], {
+          type: "new_request",
+          title: "New request needs funding approval",
+          body: `"${newRequest.title}" requires your review.`,
+          requestId: newRequest.request_id,
+          at: new Date().toISOString(),
+        });
+      }
+    }
+
+    return res.status(201).json({ message: "Request created successfully", request: newRequest });
   } catch (err) {
     console.error(err.message);
     res.status(500).send("Server error");
   }
 });
 
-// get request details
-router.get("/page/:id", verifyToken, async (req, res) => {
-  const request_id = req.params.id;
+// ─── Approve / advance through chain ─────────────────────────────────────────
+//
+// Stage 0  dept_head_review  → Dept head approves initial request
+// Stage 1  funding_approver  → Funding approver attaches proof_of_funds
+// Stage 2  dept_head_delegate→ Dept head attaches proof_of_use
+// Stage 3  verification      → Verification approver confirms fund use
+//
+router.post("/:request_id/approve", verifyToken, async (req, res) => {
+  const { action, proof, note } = req.body; // action: "approve"|"reject"
+  if (!["approve", "reject"].includes(action)) {
+    return res.status(400).json({ message: "action must be 'approve' or 'reject'" });
+  }
+
   try {
-    const request = await Request.findOne({ request_id });
-    const user = await Employee.findById(request.user_id);
-    console.log(user);
-    console.log(request);
+    const request = await Request.findOne({ request_id: req.params.request_id });
+    if (!request) return res.status(404).json({ message: "Request not found" });
+    if (["approved", "rejected", "closed"].includes(request.status)) {
+      return res.status(400).json({ message: "This request has already been finalised" });
+    }
+    if (request.status === "clarification_needed") {
+      return res.status(400).json({ message: "Awaiting clarification from the requester first" });
+    }
 
-    const data = {
+    const actorId = getActorId(req);
+    if (!actorId) return res.status(403).json({ message: "Only employees can approve requests" });
+
+    const actor = await Employee.findById(actorId);
+    const approversDoc = await getApprovers(request.company_id);
+
+    const { approval_index } = request;
+
+    // ── Authorisation per stage ─────────────────────────────────────────────
+    if (approval_index === 0) {
+      if (actor.role !== "department_head" || actor.department !== request.department) {
+        return res.status(403).json({ message: "Only the department head for this department can act here" });
+      }
+    } else if (approval_index === 1) {
+      if (approversDoc?.funding_authority !== actor.email) {
+        return res.status(403).json({ message: "Only the funding approver can act here" });
+      }
+      if (action === "approve" && !proof) {
+        return res.status(400).json({ message: "Proof of delegated funds is required" });
+      }
+    } else if (approval_index === 2) {
+      if (actor.role !== "department_head" || actor.department !== request.department) {
+        return res.status(403).json({ message: "Only the department head for this department can act here" });
+      }
+      if (action === "approve" && !proof) {
+        return res.status(400).json({ message: "Proof of fund use is required" });
+      }
+    } else if (approval_index === 3) {
+      if (approversDoc?.verification_authority !== actor.email) {
+        return res.status(403).json({ message: "Only the verification approver can act here" });
+      }
+    }
+
+    // ── Rejection (any stage) ───────────────────────────────────────────────
+    if (action === "reject") {
+      request.status = "rejected";
+      await request.save();
+      notifyUser(String(request.user_id), {
+        type: "request_update",
+        title: "Request rejected",
+        body: note || `Your request "${request.title}" was rejected.`,
+        requestId: request.request_id,
+        at: new Date().toISOString(),
+      });
+      return res.status(200).json({ message: "Request rejected", request });
+    }
+
+    // ── Advance ─────────────────────────────────────────────────────────────
+    if (approval_index === 0) {
+      // Dept head initial approval → send to funding approver
+      request.approval_index = 1;
+      request.status = "under_review";
+      await request.save();
+
+      if (approversDoc?.funding_authority) {
+        await notifyApproversByEmail(request.company_id, [approversDoc.funding_authority], {
+          type: "new_request",
+          title: "Request needs funding approval",
+          body: `"${request.title}" has been cleared by the department head. Please attach proof of delegated funds.`,
+          requestId: request.request_id,
+          at: new Date().toISOString(),
+        });
+      }
+      notifyUser(String(request.user_id), {
+        type: "request_update",
+        title: "Request advancing",
+        body: `Your request "${request.title}" was approved by the department head and is now with the funding approver.`,
+        requestId: request.request_id,
+        at: new Date().toISOString(),
+      });
+      return res.status(200).json({ message: "Forwarded to funding approver", request });
+    }
+
+    if (approval_index === 1) {
+      // Funding approver attaches proof → send back to dept head for delegation
+      request.proof_of_funds = proof;
+      request.approval_index = 2;
+      request.status = "funded";
+      await request.save();
+
+      // Notify dept head
+      const deptHead = await Employee.findOne({
+        company_id: request.company_id,
+        department: request.department,
+        role: "department_head",
+      });
+      if (deptHead) {
+        notifyUser(String(deptHead._id), {
+          type: "new_request",
+          title: "Funds approved — action required",
+          body: `Funds have been delegated for "${request.title}". Please attach proof of fund use.`,
+          requestId: request.request_id,
+          at: new Date().toISOString(),
+        });
+      }
+      notifyUser(String(request.user_id), {
+        type: "request_update",
+        title: "Funds delegated",
+        body: `Funding has been approved for your request "${request.title}".`,
+        requestId: request.request_id,
+        at: new Date().toISOString(),
+      });
+      return res.status(200).json({ message: "Proof of funds attached — forwarded to department head", request });
+    }
+
+    if (approval_index === 2) {
+      // Dept head attaches proof of use → send to verification approver
+      request.proof_of_use = proof;
+      request.approval_index = 3;
+      request.status = "delegated";
+      await request.save();
+
+      if (approversDoc?.verification_authority) {
+        await notifyApproversByEmail(request.company_id, [approversDoc.verification_authority], {
+          type: "new_request",
+          title: "Fund use ready for verification",
+          body: `"${request.title}" has proof of fund use attached. Please verify.`,
+          requestId: request.request_id,
+          at: new Date().toISOString(),
+        });
+      }
+      return res.status(200).json({ message: "Forwarded to verification approver", request });
+    }
+
+    if (approval_index === 3) {
+      // Verification approver confirms → fully approved
+      request.approval_index = 4;
+      request.status = "approved";
+      await request.save();
+
+      notifyUser(String(request.user_id), {
+        type: "request_update",
+        title: "Request fully approved ✓",
+        body: `Your request "${request.title}" has been verified and closed successfully.`,
+        requestId: request.request_id,
+        at: new Date().toISOString(),
+      });
+      return res.status(200).json({ message: "Request fully approved and verified", request });
+    }
+
+    return res.status(400).json({ message: "No further approval stages" });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server error");
+  }
+});
+
+// ─── Request clarification from the requester ─────────────────────────────────
+
+router.post("/:request_id/clarify", verifyToken, async (req, res) => {
+  const { question } = req.body;
+  if (!question) return res.status(400).json({ message: "question is required" });
+
+  try {
+    const request = await Request.findOne({ request_id: req.params.request_id });
+    if (!request) return res.status(404).json({ message: "Request not found" });
+    if (["approved", "rejected", "closed"].includes(request.status)) {
+      return res.status(400).json({ message: "Request is already finalised" });
+    }
+
+    const actorId = getActorId(req);
+    const actor = await Employee.findById(actorId);
+    if (!actor || actor.role !== "department_head" || actor.department !== request.department) {
+      return res.status(403).json({ message: "Only the department head can request clarification" });
+    }
+
+    request.clarification.push({ question, asked_by: actor._id, asked_at: new Date() });
+    request.pre_clarification_status = request.status;
+    request.status = "clarification_needed";
+    await request.save();
+
+    notifyUser(String(request.user_id), {
+      type: "clarification",
+      title: "Clarification needed",
+      body: `The department head has a question about your request "${request.title}".`,
+      requestId: request.request_id,
+      at: new Date().toISOString(),
+    });
+
+    return res.status(200).json({ message: "Clarification requested", request });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server error");
+  }
+});
+
+// ─── Requester responds to clarification ──────────────────────────────────────
+
+router.post("/:request_id/respond", verifyToken, async (req, res) => {
+  const { response } = req.body;
+  if (!response) return res.status(400).json({ message: "response is required" });
+
+  try {
+    const request = await Request.findOne({ request_id: req.params.request_id });
+    if (!request) return res.status(404).json({ message: "Request not found" });
+    if (request.status !== "clarification_needed") {
+      return res.status(400).json({ message: "No clarification is pending for this request" });
+    }
+
+    const actorId = getActorId(req);
+    if (String(request.user_id) !== actorId) {
+      return res.status(403).json({ message: "Only the requester can respond to clarification" });
+    }
+
+    // Fill in the latest unanswered clarification
+    const pending = [...request.clarification].reverse().find((c) => !c.response);
+    if (pending) {
+      pending.response = response;
+      pending.responded_at = new Date();
+      request.markModified("clarification");
+    }
+
+    request.status = request.pre_clarification_status || "pending";
+    request.pre_clarification_status = "";
+    await request.save();
+
+    // Notify the dept head
+    const deptHead = await Employee.findOne({
+      company_id: request.company_id,
+      department: request.department,
+      role: "department_head",
+    });
+    if (deptHead) {
+      notifyUser(String(deptHead._id), {
+        type: "clarification",
+        title: "Clarification received",
+        body: `The requester has responded to your question on "${request.title}".`,
+        requestId: request.request_id,
+        at: new Date().toISOString(),
+      });
+    }
+
+    return res.status(200).json({ message: "Response submitted", request });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server error");
+  }
+});
+
+// ─── Close a request (not delete) ────────────────────────────────────────────
+
+router.post("/:request_id/close", verifyToken, async (req, res) => {
+  try {
+    const request = await Request.findOne({ request_id: req.params.request_id });
+    if (!request) return res.status(404).json({ message: "Request not found" });
+    if (request.status === "closed") {
+      return res.status(400).json({ message: "Already closed" });
+    }
+
+    const actorId = getActorId(req);
+    const actor = await Employee.findById(actorId);
+
+    const isRequester = String(request.user_id) === actorId;
+    const isDeptHead = actor?.role === "department_head" && actor.department === request.department;
+
+    if (!isRequester && !isDeptHead) {
+      return res.status(403).json({ message: "Only the requester or department head can close this request" });
+    }
+
+    request.status = "closed";
+    request.closed_at = new Date();
+    request.closed_by = actor._id;
+    await request.save();
+
+    // Notify the other party
+    if (isRequester) {
+      const deptHead = await Employee.findOne({
+        company_id: request.company_id,
+        department: request.department,
+        role: "department_head",
+      });
+      if (deptHead) {
+        notifyUser(String(deptHead._id), {
+          type: "request_update",
+          title: "Request closed",
+          body: `"${request.title}" was closed by the requester.`,
+          requestId: request.request_id,
+          at: new Date().toISOString(),
+        });
+      }
+    } else {
+      notifyUser(String(request.user_id), {
+        type: "request_update",
+        title: "Request closed",
+        body: `Your request "${request.title}" was closed by the department head.`,
+        requestId: request.request_id,
+        at: new Date().toISOString(),
+      });
+    }
+
+    return res.status(200).json({ message: "Request closed", request });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server error");
+  }
+});
+
+// ─── Admin status override ────────────────────────────────────────────────────
+
+router.patch("/:id/status", verifyToken, async (req, res) => {
+  const { status, message } = req.body;
+  const VALID = ["pending", "approved", "rejected", "under_review", "funded", "delegated", "closed"];
+  if (!VALID.includes(status)) return res.status(400).json({ message: "Invalid status" });
+
+  try {
+    const request = await Request.findByIdAndUpdate(req.params.id, { $set: { status } }, { new: true });
+    if (!request) return res.status(404).json({ message: "Request not found" });
+    notifyUser(String(request.user_id), {
+      type: "request_update",
+      title: `Request ${status}`,
+      body: message || `Your request "${request.title}" status was updated to ${status}.`,
+      requestId: request.request_id,
+      at: new Date().toISOString(),
+    });
+    return res.status(200).json({ message: "Status updated", request });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server error");
+  }
+});
+
+// ─── Company-wide stats (all roles) ──────────────────────────────────────────
+
+router.get("/stats/:company_id", verifyToken, async (req, res) => {
+  try {
+    const requests = await Request.find({ company_id: req.params.company_id });
+    const total    = requests.length;
+    const approved = requests.filter(r => r.status === "approved").length;
+    const pending  = requests.filter(r => ["pending", "under_review", "funded", "delegated"].includes(r.status)).length;
+    const rejected = requests.filter(r => r.status === "rejected").length;
+    const totalAmount = requests.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0);
+    return res.status(200).json({ total, approved, pending, rejected, totalAmount });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server error");
+  }
+});
+
+// ─── Get request details ──────────────────────────────────────────────────────
+
+router.get("/:request_id", verifyToken, async (req, res) => {
+  try {
+    const request = await Request.findOne({ request_id: req.params.request_id });
+    if (!request) return res.status(404).json({ message: "Request not found" });
+
+    const requester = await Employee.findById(request.user_id).select("first_name last_name department");
+    const approversDoc = await getApprovers(request.company_id);
+
+    return res.status(200).json({
       ...request.toObject(),
-      user: user.first_name + " " + user.last_name,
-    };
-
-    res.render("request", data);
+      requesterName: requester ? `${requester.first_name} ${requester.last_name}` : "",
+      funding_authority: approversDoc?.funding_authority || "",
+      verification_authority: approversDoc?.verification_authority || "",
+    });
   } catch (err) {
     console.error(err.message);
     res.status(500).send("Server error");

@@ -111,6 +111,17 @@ router.post("/employee_register", async (req, res) => {
   if (confirm !== password)
     return res.status(400).send("Passwords do not match!");
 
+  // Check if this email was pre-assigned as an approver before account creation
+  const Approvers = require("../models/Approvers");
+  const approversDoc = await Approvers.findOne({ company_id: company.id });
+  let resolvedRole = role || "requester";
+  if (approversDoc) {
+    const preAssigned = approversDoc.approvers?.some(
+      (a) => a.email === resolvedEmail.toLowerCase()
+    );
+    if (preAssigned) resolvedRole = "approver";
+  }
+
   employee = new Employee({
     first_name: firstName,
     last_name: lastName,
@@ -118,7 +129,7 @@ router.post("/employee_register", async (req, res) => {
     department: resolvedDepartment,
     email: resolvedEmail,
     password,
-    role,
+    role: resolvedRole,
   });
 
   const salt = await bcrypt.genSalt(10);
@@ -250,6 +261,50 @@ router.post("/refresh", async (req, res) => {
   } catch (err) {
     console.error(err.message);
     res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Verify token + return fresh user data — used by the frontend to confirm a persisted session
+router.get("/me", async (req, res) => {
+  const token = req.headers["authorization"]?.split(" ")[1];
+  if (!token) return res.status(401).json({ message: "No token" });
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    if (decoded.employee) {
+      const employee = await Employee.findById(decoded.employee.id).select("-password");
+      if (!employee) return res.status(401).json({ message: "User not found" });
+      return res.status(200).json({
+        user: {
+          id: employee.id,
+          email: employee.email,
+          first_name: employee.first_name,
+          last_name: employee.last_name,
+          company_id: employee.company_id,
+          department: employee.department,
+          role: employee.role,
+          status: employee.status,
+        },
+      });
+    }
+
+    if (decoded.company) {
+      const company = await Company.findById(decoded.company.id).select("-password");
+      if (!company) return res.status(401).json({ message: "User not found" });
+      return res.status(200).json({
+        user: {
+          id: company.id,
+          company_name: company.company_name,
+          email: company.email,
+          role: company.role,
+        },
+      });
+    }
+
+    return res.status(401).json({ message: "Invalid token payload" });
+  } catch (err) {
+    return res.status(401).json({ message: "Invalid or expired token" });
   }
 });
 
