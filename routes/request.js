@@ -3,11 +3,14 @@ const Employee = require("../models/Employee");
 const Approvers = require("../models/Approvers");
 const Request = require("../models/Request");
 const verifyToken = require("../middlewares/verifyToken");
+const loadActor = require("../middlewares/loadActor");
+const verifySameCompany = require("../middlewares/verifySameCompany");
+const requireRole = require("../middlewares/requireRole");
 const { notifyUser } = require("../utils/socket");
 
 const router = express.Router();
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// helpers
 
 const getActorId = (req) => req.user?.employee?.id || null;
 
@@ -22,58 +25,18 @@ const notifyApproversByEmail = async (company_id, emailList, payload) => {
   for (const emp of employees) notifyUser(String(emp._id), payload);
 };
 
-// ─── Create request ───────────────────────────────────────────────────────────
 
-router.post("/new_request", verifyToken, async (req, res) => {
-  try {
-    const request = req.body;
 
-    const deptHead = await Employee.findOne({
-      company_id: request.company_id,
-      department: request.department,
-      role: "department_head",
-    });
+router.use(verifyToken);
 
-    const initialIndex = deptHead ? 0 : 1;
-    const newRequest = await Request.create({ ...request, approval_index: initialIndex });
-
-    if (deptHead) {
-      notifyUser(String(deptHead._id), {
-        type: "new_request",
-        title: "New request needs your review",
-        body: `"${newRequest.title}" from your department requires your approval.`,
-        requestId: newRequest.request_id,
-        at: new Date().toISOString(),
-      });
-    } else {
-      // No dept head — go straight to funding approver
-      const approversDoc = await getApprovers(request.company_id);
-      if (approversDoc?.funding_authority) {
-        await notifyApproversByEmail(request.company_id, [approversDoc.funding_authority], {
-          type: "new_request",
-          title: "New request needs funding approval",
-          body: `"${newRequest.title}" requires your review.`,
-          requestId: newRequest.request_id,
-          at: new Date().toISOString(),
-        });
-      }
-    }
-
-    return res.status(201).json({ message: "Request created successfully", request: newRequest });
-  } catch (err) {
-    console.error(err.message);
-    res.status(500).send("Server error");
-  }
-});
-
-// ─── Approve / advance through chain ─────────────────────────────────────────
+// approval chain
 //
 // Stage 0  dept_head_review  → Dept head approves initial request
 // Stage 1  funding_approver  → Funding approver attaches proof_of_funds
 // Stage 2  dept_head_delegate→ Dept head attaches proof_of_use
 // Stage 3  verification      → Verification approver confirms fund use
 //
-router.post("/:request_id/approve", verifyToken, async (req, res) => {
+router.post("/:request_id/approve", async (req, res) => {
   const { action, proof, note } = req.body; // action: "approve"|"reject"
   if (!["approve", "reject"].includes(action)) {
     return res.status(400).json({ message: "action must be 'approve' or 'reject'" });
@@ -93,11 +56,17 @@ router.post("/:request_id/approve", verifyToken, async (req, res) => {
     if (!actorId) return res.status(403).json({ message: "Only employees can approve requests" });
 
     const actor = await Employee.findById(actorId);
+    if (!actor || String(actor.company_id) !== String(request.company_id)) {
+      return res.status(403).json({ message: "You do not have access to this company's data" });
+    }
+    if (actor.status === "suspended") {
+      return res.status(403).json({ message: "Your account has been suspended. Contact your organization admin." });
+    }
     const approversDoc = await getApprovers(request.company_id);
 
     const { approval_index } = request;
 
-    // ── Authorisation per stage ─────────────────────────────────────────────
+    // authorisation per stage 
     if (approval_index === 0) {
       if (actor.role !== "department_head" || actor.department !== request.department) {
         return res.status(403).json({ message: "Only the department head for this department can act here" });
@@ -122,7 +91,7 @@ router.post("/:request_id/approve", verifyToken, async (req, res) => {
       }
     }
 
-    // ── Rejection (any stage) ───────────────────────────────────────────────
+    // rejection (any stage) 
     if (action === "reject") {
       request.status = "rejected";
       await request.save();
@@ -136,9 +105,9 @@ router.post("/:request_id/approve", verifyToken, async (req, res) => {
       return res.status(200).json({ message: "Request rejected", request });
     }
 
-    // ── Advance ─────────────────────────────────────────────────────────────
+    //  Advance
     if (approval_index === 0) {
-      // Dept head initial approval → send to funding approver
+      // Dept head initial approval 
       request.approval_index = 1;
       request.status = "under_review";
       await request.save();
@@ -163,13 +132,13 @@ router.post("/:request_id/approve", verifyToken, async (req, res) => {
     }
 
     if (approval_index === 1) {
-      // Funding approver attaches proof → send back to dept head for delegation
+      // Funding approver attaches proof 
       request.proof_of_funds = proof;
       request.approval_index = 2;
       request.status = "funded";
       await request.save();
 
-      // Notify dept head
+      // notify dept head
       const deptHead = await Employee.findOne({
         company_id: request.company_id,
         department: request.department,
@@ -195,7 +164,7 @@ router.post("/:request_id/approve", verifyToken, async (req, res) => {
     }
 
     if (approval_index === 2) {
-      // Dept head attaches proof of use → send to verification approver
+      // Dept head attaches proof of use 
       request.proof_of_use = proof;
       request.approval_index = 3;
       request.status = "delegated";
@@ -214,7 +183,7 @@ router.post("/:request_id/approve", verifyToken, async (req, res) => {
     }
 
     if (approval_index === 3) {
-      // Verification approver confirms → fully approved
+      // Verification approver confirms 
       request.approval_index = 4;
       request.status = "approved";
       await request.save();
@@ -236,9 +205,8 @@ router.post("/:request_id/approve", verifyToken, async (req, res) => {
   }
 });
 
-// ─── Request clarification from the requester ─────────────────────────────────
-
-router.post("/:request_id/clarify", verifyToken, async (req, res) => {
+// request clarification from the requester 
+router.post("/:request_id/clarify", async (req, res) => {
   const { question } = req.body;
   if (!question) return res.status(400).json({ message: "question is required" });
 
@@ -251,7 +219,13 @@ router.post("/:request_id/clarify", verifyToken, async (req, res) => {
 
     const actorId = getActorId(req);
     const actor = await Employee.findById(actorId);
-    if (!actor || actor.role !== "department_head" || actor.department !== request.department) {
+    if (!actor || String(actor.company_id) !== String(request.company_id)) {
+      return res.status(403).json({ message: "You do not have access to this company's data" });
+    }
+    if (actor.status === "suspended") {
+      return res.status(403).json({ message: "Your account has been suspended. Contact your organization admin." });
+    }
+    if (actor.role !== "department_head" || actor.department !== request.department) {
       return res.status(403).json({ message: "Only the department head can request clarification" });
     }
 
@@ -275,9 +249,8 @@ router.post("/:request_id/clarify", verifyToken, async (req, res) => {
   }
 });
 
-// ─── Requester responds to clarification ──────────────────────────────────────
-
-router.post("/:request_id/respond", verifyToken, async (req, res) => {
+// requester responds to clarification 
+router.post("/:request_id/respond", async (req, res) => {
   const { response } = req.body;
   if (!response) return res.status(400).json({ message: "response is required" });
 
@@ -291,6 +264,11 @@ router.post("/:request_id/respond", verifyToken, async (req, res) => {
     const actorId = getActorId(req);
     if (String(request.user_id) !== actorId) {
       return res.status(403).json({ message: "Only the requester can respond to clarification" });
+    }
+
+    const actor = await Employee.findById(actorId);
+    if (actor?.status === "suspended") {
+      return res.status(403).json({ message: "Your account has been suspended. Contact your organization admin." });
     }
 
     // Fill in the latest unanswered clarification
@@ -328,9 +306,8 @@ router.post("/:request_id/respond", verifyToken, async (req, res) => {
   }
 });
 
-// ─── Close a request (not delete) ────────────────────────────────────────────
-
-router.post("/:request_id/close", verifyToken, async (req, res) => {
+// close request 
+router.post("/:request_id/close", async (req, res) => {
   try {
     const request = await Request.findOne({ request_id: req.params.request_id });
     if (!request) return res.status(404).json({ message: "Request not found" });
@@ -340,6 +317,12 @@ router.post("/:request_id/close", verifyToken, async (req, res) => {
 
     const actorId = getActorId(req);
     const actor = await Employee.findById(actorId);
+    if (!actor || String(actor.company_id) !== String(request.company_id)) {
+      return res.status(403).json({ message: "You do not have access to this company's data" });
+    }
+    if (actor.status === "suspended") {
+      return res.status(403).json({ message: "Your account has been suspended. Contact your organization admin." });
+    }
 
     const isRequester = String(request.user_id) === actorId;
     const isDeptHead = actor?.role === "department_head" && actor.department === request.department;
@@ -386,16 +369,67 @@ router.post("/:request_id/close", verifyToken, async (req, res) => {
   }
 });
 
-// ─── Admin status override ────────────────────────────────────────────────────
 
-router.patch("/:id/status", verifyToken, async (req, res) => {
+
+router.use(loadActor);
+
+// create request 
+router.post("/new_request", async (req, res) => {
+  try {
+    const request = { ...req.body, company_id: req.actor.company_id, user_id: req.actor.id };
+
+    const deptHead = await Employee.findOne({
+      company_id: request.company_id,
+      department: request.department,
+      role: "department_head",
+    });
+
+    const initialIndex = deptHead ? 0 : 1;
+    const newRequest = await Request.create({ ...request, approval_index: initialIndex });
+
+    if (deptHead) {
+      notifyUser(String(deptHead._id), {
+        type: "new_request",
+        title: "New request needs your review",
+        body: `"${newRequest.title}" from your department requires your approval.`,
+        requestId: newRequest.request_id,
+        at: new Date().toISOString(),
+      });
+    } else {
+      // No dept head — go straight to funding approver
+      const approversDoc = await getApprovers(request.company_id);
+      if (approversDoc?.funding_authority) {
+        await notifyApproversByEmail(request.company_id, [approversDoc.funding_authority], {
+          type: "new_request",
+          title: "New request needs funding approval",
+          body: `"${newRequest.title}" requires your review.`,
+          requestId: newRequest.request_id,
+          at: new Date().toISOString(),
+        });
+      }
+    }
+
+    return res.status(201).json({ message: "Request created successfully", request: newRequest });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server error");
+  }
+});
+
+//  admin status override 
+router.patch("/:id/status", requireRole("admin"), async (req, res) => {
   const { status, message } = req.body;
   const VALID = ["pending", "approved", "rejected", "under_review", "funded", "delegated", "closed"];
   if (!VALID.includes(status)) return res.status(400).json({ message: "Invalid status" });
 
   try {
+    const existing = await Request.findById(req.params.id);
+    if (!existing) return res.status(404).json({ message: "Request not found" });
+    if (String(existing.company_id) !== req.actor.company_id) {
+      return res.status(403).json({ message: "You do not have access to this company's data" });
+    }
+
     const request = await Request.findByIdAndUpdate(req.params.id, { $set: { status } }, { new: true });
-    if (!request) return res.status(404).json({ message: "Request not found" });
     notifyUser(String(request.user_id), {
       type: "request_update",
       title: `Request ${status}`,
@@ -410,9 +444,8 @@ router.patch("/:id/status", verifyToken, async (req, res) => {
   }
 });
 
-// ─── Company-wide stats (all roles) ──────────────────────────────────────────
-
-router.get("/stats/:company_id", verifyToken, async (req, res) => {
+// company-wide stats (all roles)
+router.get("/stats/:company_id", verifySameCompany("params:company_id"), async (req, res) => {
   try {
     const requests = await Request.find({ company_id: req.params.company_id });
     const total    = requests.length;
@@ -427,12 +460,14 @@ router.get("/stats/:company_id", verifyToken, async (req, res) => {
   }
 });
 
-// ─── Get request details ──────────────────────────────────────────────────────
-
-router.get("/:request_id", verifyToken, async (req, res) => {
+// get request details 
+router.get("/:request_id", async (req, res) => {
   try {
     const request = await Request.findOne({ request_id: req.params.request_id });
     if (!request) return res.status(404).json({ message: "Request not found" });
+    if (String(request.company_id) !== req.actor.company_id) {
+      return res.status(404).json({ message: "Request not found" });
+    }
 
     const requester = await Employee.findById(request.user_id).select("first_name last_name department");
     const approversDoc = await getApprovers(request.company_id);

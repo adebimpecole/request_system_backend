@@ -1,7 +1,10 @@
 const express = require("express");
+const mongoose = require("mongoose");
 const Company = require("../models/Company");
 const verifyToken = require("../middlewares/verifyToken");
-const verifyRole = require("../middlewares/verifyRole");
+const loadActor = require("../middlewares/loadActor");
+const verifySameCompany = require("../middlewares/verifySameCompany");
+const requireRole = require("../middlewares/requireRole");
 const Employee = require("../models/Employee");
 const Request = require("../models/Request");
 const Approvers = require("../models/Approvers");
@@ -9,18 +12,29 @@ const Departments = require("../models/Departments");
 
 const router = express.Router();
 
+const UPDATABLE_COMPANY_FIELDS = ["company_name", "budget", "profile_picture"];
+
+router.use(verifyToken, loadActor);
+
 // Update company info
 router.put("/:id", async (req, res) => {
   const companyId = req.params.id;
-  const updates = req.body;
+
+  if (req.actor.type !== "company" || req.actor.id !== companyId) {
+    return res.status(403).json({ message: "You can only update your own company" });
+  }
+
+  const updates = {};
+  for (const field of UPDATABLE_COMPANY_FIELDS) {
+    if (req.body[field] !== undefined) updates[field] = req.body[field];
+  }
 
   try {
-    // Find user by ID and update fields dynamically
-    let company = await Company.findByIdAndUpdate(
+    const company = await Company.findByIdAndUpdate(
       companyId,
       { $set: updates },
-      { new: true, useFindAndModify: false }, // Return the updated user
-    );
+      { new: true, useFindAndModify: false },
+    ).select("-password");
 
     if (!company) {
       return res.status(404).json({ msg: "User not found" });
@@ -34,7 +48,7 @@ router.put("/:id", async (req, res) => {
 });
 
 // get employees
-router.get("/:id", verifyToken, verifyRole, async (req, res) => {
+router.get("/:id", verifySameCompany("params:id"), async (req, res) => {
   const id = req.params.id;
   try {
     const employees = await Employee.find({ company_id: id });
@@ -53,20 +67,18 @@ router.get("/:id", verifyToken, verifyRole, async (req, res) => {
 });
 
 // get company
-const mongoose = require("mongoose");
-
-router.get("/get_company/:code", async (req, res) => {
+router.get("/get_company/:code",  async (req, res) => {
   try {
     const { code } = req.params;
 
     let company = null;
 
     if (mongoose.Types.ObjectId.isValid(code)) {
-      company = await Company.findById(code);
+      company = await Company.findById(code).select("-password");
     }
 
     if (!company) {
-      company = await Company.findOne({ company_code: code });
+      company = await Company.findOne({ company_code: code }).select("-password");
     }
 
     if (!company) {
@@ -74,6 +86,10 @@ router.get("/get_company/:code", async (req, res) => {
         message: "Company not found",
         status: 404,
       });
+    }
+
+    if (String(company._id) !== req.actor.company_id) {
+      return res.status(403).json({ message: "You do not have access to this company's data" });
     }
 
     const approversDoc = await Approvers.findOne({ company_id: company._id });
@@ -112,7 +128,7 @@ router.get("/get_company/:code", async (req, res) => {
 });
 
 // get company requests
-router.get("/requests/:id", verifyToken, verifyRole, async (req, res) => {
+router.get("/requests/:id", verifySameCompany("params:id"), requireRole("admin", "department_head", "approver"), async (req, res) => {
   const id = req.params.id;
   try {
     const requests = await Request.find({ company_id: id });
@@ -129,7 +145,7 @@ router.get("/requests/:id", verifyToken, verifyRole, async (req, res) => {
 });
 
 // get company emplyees
-router.get("/employees/:id", verifyToken, verifyRole, async (req, res) => {
+router.get("/employees/:id", verifySameCompany("params:id"), async (req, res) => {
   const id = req.params.id;
   try {
     const employees = await Employee.find({ company_id: id });

@@ -9,6 +9,9 @@ const Employee = require("../models/Employee");
 const Session = require("../models/Session");
 const Invite = require("../models/Invite");
 const BlockedUser = require("../models/BlockedUser");
+const PasswordReset = require("../models/PasswordReset");
+const { sendPasswordResetEmail } = require("../utils/mailer");
+const { authLimiter, sensitiveActionLimiter } = require("../middlewares/rateLimit");
 
 const router = express.Router();
 
@@ -27,7 +30,7 @@ const createSession = async (userId, userType) => {
 };
 
 // Company Register
-router.post("/company_register", async (req, res) => {
+router.post("/company_register", authLimiter, async (req, res) => {
   const { company_name, email, password, confirm, company_code } = req.body;
 
   let company = await Company.findOne({ email });
@@ -66,7 +69,7 @@ router.post("/company_register", async (req, res) => {
 });
 
 // Employee Register
-router.post("/employee_register", async (req, res) => {
+router.post("/employee_register", authLimiter, async (req, res) => {
   const {
     firstName,
     lastName,
@@ -75,7 +78,6 @@ router.post("/employee_register", async (req, res) => {
     email,
     password,
     confirm,
-    role,
     inviteToken,
   } = req.body;
 
@@ -83,8 +85,6 @@ router.post("/employee_register", async (req, res) => {
   let resolvedDepartment = department;
   let invite = null;
 
-  // If signing up via an invite link, the invite is the source of truth for
-  // email/department/company — the link can't be repurposed for another company.
   if (inviteToken) {
     invite = await Invite.findOne({ token: inviteToken });
     if (!invite) return res.status(404).json({ message: "Invite not found" });
@@ -111,10 +111,9 @@ router.post("/employee_register", async (req, res) => {
   if (confirm !== password)
     return res.status(400).send("Passwords do not match!");
 
-  // Check if this email was pre-assigned as an approver before account creation
   const Approvers = require("../models/Approvers");
   const approversDoc = await Approvers.findOne({ company_id: company.id });
-  let resolvedRole = role || "requester";
+  let resolvedRole = "requester";
   if (approversDoc) {
     const preAssigned = approversDoc.approvers?.some(
       (a) => a.email === resolvedEmail.toLowerCase()
@@ -161,7 +160,7 @@ router.post("/employee_register", async (req, res) => {
 });
 
 // Login
-router.post("/login", async (req, res) => {
+router.post("/login", authLimiter, async (req, res) => {
   const { email, password } = req.body;
 
   try {
@@ -178,6 +177,10 @@ router.post("/login", async (req, res) => {
       const passwordCheck = await bcrypt.compare(password, employee.password);
       if (!passwordCheck) {
         return res.status(400).send({ message: "Passwords does not match" });
+      }
+
+      if (employee.status === "suspended") {
+        return res.status(403).json({ message: "Your account has been suspended. Contact your organization admin." });
       }
 
       const token = signAccessToken({ employee: { id: employee.id } });
@@ -225,6 +228,74 @@ router.post("/login", async (req, res) => {
   } catch (err) {
     console.error(err.message);
     res.status(500).send("Server error");
+  }
+});
+
+const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+// forgot password
+router.post("/forgot_password", sensitiveActionLimiter, async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ message: "Email is required" });
+
+  try {
+    const employee = await Employee.findOne({ email: email.toLowerCase() });
+    const company = employee ? null : await Company.findOne({ email: email.toLowerCase() });
+    const account = employee || company;
+
+    if (account) {
+      const token = crypto.randomBytes(32).toString("hex");
+      await PasswordReset.create({
+        userId: account._id,
+        userType: employee ? "employee" : "company",
+        token,
+        expiresAt: new Date(Date.now() + RESET_TOKEN_TTL_MS),
+      });
+
+      sendPasswordResetEmail({
+        to: account.email,
+        resetLink: `/reset-password?token=${token}`,
+      }).catch((err) => console.error("[password reset email]", err.message));
+    }
+
+    return res.status(200).json({ message: "If an account exists for that email, a reset link has been sent." });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Reset password 
+router.post("/reset_password", sensitiveActionLimiter, async (req, res) => {
+  const { token, password, confirm } = req.body;
+  if (!token || !password) return res.status(400).json({ message: "Token and new password are required" });
+  if (password !== confirm) return res.status(400).json({ message: "Passwords do not match" });
+  if (password.length < 8) return res.status(400).json({ message: "Password must be at least 8 characters" });
+
+  try {
+    const reset = await PasswordReset.findOne({ token });
+    if (!reset) return res.status(404).json({ message: "This reset link is invalid." });
+    if (reset.usedAt) return res.status(410).json({ message: "This reset link has already been used." });
+    if (reset.expiresAt < new Date()) return res.status(410).json({ message: "This reset link has expired." });
+
+    const Model = reset.userType === "employee" ? Employee : Company;
+    const account = await Model.findById(reset.userId);
+    if (!account) return res.status(404).json({ message: "Account not found." });
+
+    const salt = await bcrypt.genSalt(10);
+    account.password = await bcrypt.hash(password, salt);
+    await account.save();
+
+    reset.usedAt = new Date();
+    await reset.save();
+
+    // Invalidate every existing session so a reset also kills any stolen/leaked login
+    await Session.deleteMany({ userId: account._id, userType: reset.userType });
+
+    return res.status(200).json({ message: "Password updated. You can now log in." });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).json({ message: "Server error" });
   }
 });
 

@@ -3,24 +3,31 @@ const Company = require("../models/Company");
 const Approvers = require("../models/Approvers");
 const Employee = require("../models/Employee");
 const verifyToken = require("../middlewares/verifyToken");
+const loadActor = require("../middlewares/loadActor");
+const requireRole = require("../middlewares/requireRole");
 
 const router = express.Router();
 
+router.use(verifyToken, loadActor);
+
 // Add approvers
-router.post("/add_approver", verifyToken, async (req, res) => {
-  const updates = req.body;
+router.post("/add_approver", requireRole("admin"), async (req, res) => {
+  const { company_id, approvers } = req.body;
+
+  if (req.actor.company_id !== String(company_id)) {
+    return res.status(403).json({ message: "You do not have access to this company's data" });
+  }
 
   try {
-    // Check if the company exists in the Companies collection
-    const company = await Company.findById(updates.company_id);
+    const company = await Company.findById(company_id);
 
     if (!company) {
       return res.status(404).json({ message: "Company not found" });
     }
 
     await Approvers.findOneAndUpdate(
-      { company_id: updates.company_id },
-      { $set: updates },
+      { company_id },
+      { $set: { approvers } },
       { new: true, upsert: true },
     );
     return res.status(200).json({
@@ -32,19 +39,26 @@ router.post("/add_approver", verifyToken, async (req, res) => {
   }
 });
 
-router.post("/add_role", verifyToken, async (req, res) => {
-  const updates = req.body;
+router.post("/add_role", requireRole("admin"), async (req, res) => {
+  const { company_id, funding_authority, verification_authority } = req.body;
+
+  if (req.actor.company_id !== String(company_id)) {
+    return res.status(403).json({ message: "You do not have access to this company's data" });
+  }
+
+  const updates = {};
+  if (funding_authority !== undefined) updates.funding_authority = funding_authority;
+  if (verification_authority !== undefined) updates.verification_authority = verification_authority;
 
   try {
-    // Check if the company exists in the Companies collection
-    const company = await Company.findById(updates.company_id);
+    const company = await Company.findById(company_id);
 
     if (!company) {
       return res.status(404).json({ message: "Company not found" });
     }
 
     await Approvers.findOneAndUpdate(
-      { company_id: updates.company_id },
+      { company_id },
       { $set: updates },
       { new: true, upsert: true },
     );
@@ -57,10 +71,14 @@ router.post("/add_role", verifyToken, async (req, res) => {
   }
 });
 
-// Promote an employee to approver (or department_head — also a first-tier approver)
-router.post("/assign", verifyToken, async (req, res) => {
+// Promote an employee to approver or department head 
+router.post("/assign", requireRole("admin"), async (req, res) => {
   const { company_id, employee_id, role } = req.body;
   const targetRole = role === "department_head" ? "department_head" : "approver";
+
+  if (req.actor.company_id !== String(company_id)) {
+    return res.status(403).json({ message: "You do not have access to this company's data" });
+  }
 
   try {
     const employee = await Employee.findOne({ _id: employee_id, company_id });
@@ -100,8 +118,12 @@ router.post("/assign", verifyToken, async (req, res) => {
 });
 
 // Demote an approver back to requester
-router.post("/unassign", verifyToken, async (req, res) => {
+router.post("/unassign", requireRole("admin"), async (req, res) => {
   const { company_id, employee_id } = req.body;
+
+  if (req.actor.company_id !== String(company_id)) {
+    return res.status(403).json({ message: "You do not have access to this company's data" });
+  }
 
   try {
     const employee = await Employee.findOne({ _id: employee_id, company_id });
@@ -127,8 +149,13 @@ router.post("/unassign", verifyToken, async (req, res) => {
   }
 });
 
-router.get("/get_approvers", verifyToken, async (req, res) => {
+router.get("/get_approvers", async (req, res) => {
   const { company_id } = req.body;
+
+  if (req.actor.company_id !== String(company_id)) {
+    return res.status(403).json({ message: "You do not have access to this company's data" });
+  }
+
   try {
     const company = await Company.findById(company_id);
 
@@ -146,39 +173,5 @@ router.get("/get_approvers", verifyToken, async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
-
-// router.post("/add_approver", async (req, res) => {
-//     const updates = req.body;
-
-//     try {
-//       // Check if the company exists in the Companies collection
-//       const company = await Company.findById(updates.companyid);
-
-//       if (!company) {
-//         return res.status(404).json({ message: "Company not found" });
-//       }
-
-//       await Approvers.findOneAndUpdate(
-//         { companyid: updates.companyid },
-//         { $set: updates.fundingAuthority },
-//         { new: true, upsert: true }
-//       ).then((err) => {
-//         if (err) {
-//           return res.status(200).json({
-//             message: "Approvers Saved",
-//           });
-//         }
-//         return res.json(doc);
-//       })
-//       .catch((err) => {
-//         return res.status(500).json({
-//           message: "Error saving approvers!",
-//         });
-//       })
-//     } catch (err) {
-//       console.error(err.message);
-//       res.status(500).send("Server error");
-//     }
-//   });
 
 module.exports = router;
