@@ -32,6 +32,7 @@ app.use("/api/employee", require("./routes/employee"));
 app.use("/api/department", require("./routes/department"));
 app.use("/api/approver", require("./routes/approvers"));
 app.use("/api/request", require("./routes/request"));
+app.use("/api/upload", require("./routes/upload"));
 
 // Connect to MongoDB, then start HTTP server + Socket.io
 const PORT = process.env.PORT || 9000;

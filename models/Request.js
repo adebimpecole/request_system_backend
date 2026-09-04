@@ -31,6 +31,7 @@ const RequestSchema = new mongoose.Schema({
     {
       question: { type: String, required: true },
       asked_by: { type: mongoose.Schema.Types.ObjectId, ref: "Employee" },
+      asked_by_role: { type: String, default: "" }, // decides who's expected to respond
       asked_at: { type: Date, default: Date.now },
       response: { type: String, default: "" },
       responded_at: { type: Date },

@@ -225,22 +225,44 @@ router.post("/:request_id/clarify", async (req, res) => {
     if (actor.status === "suspended") {
       return res.status(403).json({ message: "Your account has been suspended. Contact your organization admin." });
     }
-    if (actor.role !== "department_head" || actor.department !== request.department) {
-      return res.status(403).json({ message: "Only the department head can request clarification" });
+
+    const isDeptHead = actor.role === "department_head" && actor.department === request.department;
+    const approversDoc = await getApprovers(request.company_id);
+    const isVerificationApprover = request.approval_index === 3 && approversDoc?.verification_authority === actor.email;
+
+    if (!isDeptHead && !isVerificationApprover) {
+      return res.status(403).json({ message: "Only the department head or verification approver can request clarification" });
     }
 
-    request.clarification.push({ question, asked_by: actor._id, asked_at: new Date() });
+    request.clarification.push({ question, asked_by: actor._id, asked_by_role: actor.role, asked_at: new Date() });
     request.pre_clarification_status = request.status;
     request.status = "clarification_needed";
     await request.save();
 
-    notifyUser(String(request.user_id), {
-      type: "clarification",
-      title: "Clarification needed",
-      body: `The department head has a question about your request "${request.title}".`,
-      requestId: request.request_id,
-      at: new Date().toISOString(),
-    });
+    if (isDeptHead) {
+      notifyUser(String(request.user_id), {
+        type: "clarification",
+        title: "Clarification needed",
+        body: `The department head has a question about your request "${request.title}".`,
+        requestId: request.request_id,
+        at: new Date().toISOString(),
+      });
+    } else {
+      const deptHead = await Employee.findOne({
+        company_id: request.company_id,
+        department: request.department,
+        role: "department_head",
+      });
+      if (deptHead) {
+        notifyUser(String(deptHead._id), {
+          type: "clarification",
+          title: "Clearer proof of use needed",
+          body: `The verification approver needs clearer proof of use for "${request.title}".`,
+          requestId: request.request_id,
+          at: new Date().toISOString(),
+        });
+      }
+    }
 
     return res.status(200).json({ message: "Clarification requested", request });
   } catch (err) {
@@ -249,7 +271,7 @@ router.post("/:request_id/clarify", async (req, res) => {
   }
 });
 
-// requester responds to clarification 
+// respond to clarification 
 router.post("/:request_id/respond", async (req, res) => {
   const { response } = req.body;
   if (!response) return res.status(400).json({ message: "response is required" });
@@ -261,43 +283,49 @@ router.post("/:request_id/respond", async (req, res) => {
       return res.status(400).json({ message: "No clarification is pending for this request" });
     }
 
-    const actorId = getActorId(req);
-    if (String(request.user_id) !== actorId) {
-      return res.status(403).json({ message: "Only the requester can respond to clarification" });
+    const pending = [...request.clarification].reverse().find((c) => !c.response);
+    if (!pending) {
+      return res.status(400).json({ message: "No clarification is pending for this request" });
     }
 
+    const actorId = getActorId(req);
     const actor = await Employee.findById(actorId);
-    if (actor?.status === "suspended") {
+    if (!actor || String(actor.company_id) !== String(request.company_id)) {
+      return res.status(403).json({ message: "You do not have access to this company's data" });
+    }
+    if (actor.status === "suspended") {
       return res.status(403).json({ message: "Your account has been suspended. Contact your organization admin." });
     }
 
-    // Fill in the latest unanswered clarification
-    const pending = [...request.clarification].reverse().find((c) => !c.response);
-    if (pending) {
-      pending.response = response;
-      pending.responded_at = new Date();
-      request.markModified("clarification");
+    const askedByDeptHead = pending.asked_by_role ? pending.asked_by_role === "department_head" : true;
+    const isRequester = String(request.user_id) === actorId;
+    const isDeptHead = actor.role === "department_head" && actor.department === request.department;
+    const authorized = askedByDeptHead ? isRequester : isDeptHead;
+
+    if (!authorized) {
+      return res.status(403).json({
+        message: askedByDeptHead
+          ? "Only the requester can respond to clarification"
+          : "Only the department head can respond to this clarification",
+      });
     }
+
+    pending.response = response;
+    pending.responded_at = new Date();
+    request.markModified("clarification");
 
     request.status = request.pre_clarification_status || "pending";
     request.pre_clarification_status = "";
     await request.save();
 
-    // Notify the dept head
-    const deptHead = await Employee.findOne({
-      company_id: request.company_id,
-      department: request.department,
-      role: "department_head",
+    // Notify whoever originally asked
+    notifyUser(String(pending.asked_by), {
+      type: "clarification",
+      title: "Clarification received",
+      body: `${askedByDeptHead ? "The requester" : "The department head"} has responded to your question on "${request.title}".`,
+      requestId: request.request_id,
+      at: new Date().toISOString(),
     });
-    if (deptHead) {
-      notifyUser(String(deptHead._id), {
-        type: "clarification",
-        title: "Clarification received",
-        body: `The requester has responded to your question on "${request.title}".`,
-        requestId: request.request_id,
-        at: new Date().toISOString(),
-      });
-    }
 
     return res.status(200).json({ message: "Response submitted", request });
   } catch (err) {
@@ -313,6 +341,10 @@ router.post("/:request_id/close", async (req, res) => {
     if (!request) return res.status(404).json({ message: "Request not found" });
     if (request.status === "closed") {
       return res.status(400).json({ message: "Already closed" });
+    }
+    // Once funds are delegated (proof of use attached, awaiting verification)
+    if (["delegated", "approved"].includes(request.status)) {
+      return res.status(400).json({ message: "This request can no longer be closed — funds have already been delegated." });
     }
 
     const actorId = getActorId(req);
@@ -448,11 +480,13 @@ router.patch("/:id/status", requireRole("admin"), async (req, res) => {
 router.get("/stats/:company_id", verifySameCompany("params:company_id"), async (req, res) => {
   try {
     const requests = await Request.find({ company_id: req.params.company_id });
+    const approvedRequests = requests.filter(r => r.status === "approved");
     const total    = requests.length;
-    const approved = requests.filter(r => r.status === "approved").length;
+    const approved = approvedRequests.length;
     const pending  = requests.filter(r => ["pending", "under_review", "funded", "delegated"].includes(r.status)).length;
     const rejected = requests.filter(r => r.status === "rejected").length;
-    const totalAmount = requests.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0);
+    // Disbursed = only money that's actually gone out 
+    const totalAmount = approvedRequests.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0);
     return res.status(200).json({ total, approved, pending, rejected, totalAmount });
   } catch (err) {
     console.error(err.message);
@@ -471,12 +505,18 @@ router.get("/:request_id", async (req, res) => {
 
     const requester = await Employee.findById(request.user_id).select("first_name last_name department");
     const approversDoc = await getApprovers(request.company_id);
+    const deptHead = await Employee.findOne({
+      company_id: request.company_id,
+      department: request.department,
+      role: "department_head",
+    }).select("_id");
 
     return res.status(200).json({
       ...request.toObject(),
       requesterName: requester ? `${requester.first_name} ${requester.last_name}` : "",
       funding_authority: approversDoc?.funding_authority || "",
       verification_authority: approversDoc?.verification_authority || "",
+      has_department_head: !!deptHead,
     });
   } catch (err) {
     console.error(err.message);

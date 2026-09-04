@@ -1,5 +1,7 @@
 const { Server } = require("socket.io");
 const jwt = require("jsonwebtoken");
+const Employee = require("../models/Employee");
+const Company = require("../models/Company");
 
 let io = null;
 
@@ -12,16 +14,32 @@ const initSocket = (httpServer) => {
     },
   });
 
-  // Auth middleware — require a valid JWT on connection
-  io.use((socket, next) => {
+  // Auth middleware 
+  io.use(async (socket, next) => {
     const token = socket.handshake.auth?.token;
     if (!token) return next(new Error("Authentication required"));
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      socket.userId = decoded.id;
-      socket.userRole = decoded.role;
-      socket.companyId = decoded.company_id || decoded.id; // admin id is their company id
-      next();
+
+      if (decoded.employee?.id) {
+        const employee = await Employee.findById(decoded.employee.id).select("company_id role");
+        if (!employee) return next(new Error("User not found"));
+        socket.userId = String(employee._id);
+        socket.userRole = employee.role;
+        socket.companyId = String(employee.company_id);
+        return next();
+      }
+
+      if (decoded.company?.id) {
+        const company = await Company.findById(decoded.company.id).select("_id");
+        if (!company) return next(new Error("User not found"));
+        socket.userId = String(company._id);
+        socket.userRole = "admin";
+        socket.companyId = String(company._id);
+        return next();
+      }
+
+      return next(new Error("Invalid token payload"));
     } catch {
       next(new Error("Invalid token"));
     }

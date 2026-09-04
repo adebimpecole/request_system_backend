@@ -2,13 +2,37 @@ const express = require("express");
 const Company = require("../models/Company");
 const Approvers = require("../models/Approvers");
 const Employee = require("../models/Employee");
+const Request = require("../models/Request");
 const verifyToken = require("../middlewares/verifyToken");
 const loadActor = require("../middlewares/loadActor");
 const requireRole = require("../middlewares/requireRole");
+const { notifyUser } = require("../utils/socket");
 
 const router = express.Router();
 
 router.use(verifyToken, loadActor);
+
+const notifyOfPendingWork = async (company_id, approval_index, authorityEmail, label) => {
+  if (!authorityEmail) return;
+  const employee = await Employee.findOne({ company_id, email: authorityEmail });
+  if (!employee) return;
+
+  const pending = await Request.find({
+    company_id,
+    approval_index,
+    status: { $nin: ["approved", "rejected", "closed"] },
+  });
+
+  for (const r of pending) {
+    notifyUser(String(employee._id), {
+      type: "new_request",
+      title: `You're now the ${label} approver`,
+      body: `"${r.title}" is waiting on your ${label} approval.`,
+      requestId: r.request_id,
+      at: new Date().toISOString(),
+    });
+  }
+};
 
 // Add approvers
 router.post("/add_approver", requireRole("admin"), async (req, res) => {
@@ -62,6 +86,12 @@ router.post("/add_role", requireRole("admin"), async (req, res) => {
       { $set: updates },
       { new: true, upsert: true },
     );
+
+    await Promise.all([
+      notifyOfPendingWork(company_id, 1, funding_authority, "funding"),
+      notifyOfPendingWork(company_id, 3, verification_authority, "verification"),
+    ]);
+
     return res.status(200).json({
       message: "Role Saved",
     });
