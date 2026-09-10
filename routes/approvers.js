@@ -8,6 +8,8 @@ const loadActor = require("../middlewares/loadActor");
 const requireRole = require("../middlewares/requireRole");
 const { notifyUser } = require("../utils/socket");
 const { logActivity } = require("../utils/auditLog");
+const validate = require("../middlewares/validate");
+const schemas = require("../middlewares/schemas");
 
 const router = express.Router();
 
@@ -36,7 +38,7 @@ const notifyOfPendingWork = async (company_id, approval_index, authorityEmail, l
 };
 
 // Add approvers
-router.post("/add_approver", requireRole("admin"), async (req, res) => {
+router.post("/add_approver", requireRole("admin"), validate(schemas.addApprovers), async (req, res) => {
   const { company_id, approvers } = req.body;
 
   if (req.actor.company_id !== String(company_id)) {
@@ -64,7 +66,7 @@ router.post("/add_approver", requireRole("admin"), async (req, res) => {
   }
 });
 
-router.post("/add_role", requireRole("admin"), async (req, res) => {
+router.post("/add_role", requireRole("admin"), validate(schemas.addRole), async (req, res) => {
   const { company_id, funding_authority, verification_authority } = req.body;
 
   if (req.actor.company_id !== String(company_id)) {
@@ -122,9 +124,9 @@ router.post("/add_role", requireRole("admin"), async (req, res) => {
 });
 
 // Promote an employee to approver or department head 
-router.post("/assign", requireRole("admin"), async (req, res) => {
+router.post("/assign", requireRole("admin"), validate(schemas.assignApprover), async (req, res) => {
   const { company_id, employee_id, role } = req.body;
-  const targetRole = role === "department_head" ? "department_head" : "approver";
+  const targetRole = role;
 
   if (req.actor.company_id !== String(company_id)) {
     return res.status(403).json({ message: "You do not have access to this company's data" });
@@ -176,7 +178,7 @@ router.post("/assign", requireRole("admin"), async (req, res) => {
 });
 
 // Demote an approver back to requester
-router.post("/unassign", requireRole("admin"), async (req, res) => {
+router.post("/unassign", requireRole("admin"), validate(schemas.unassignApprover), async (req, res) => {
   const { company_id, employee_id } = req.body;
 
   if (req.actor.company_id !== String(company_id)) {

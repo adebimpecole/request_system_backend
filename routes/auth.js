@@ -12,6 +12,8 @@ const BlockedUser = require("../models/BlockedUser");
 const PasswordReset = require("../models/PasswordReset");
 const { sendPasswordResetEmail } = require("../utils/mailer");
 const { authLimiter, sensitiveActionLimiter } = require("../middlewares/rateLimit");
+const validate = require("../middlewares/validate");
+const schemas = require("../middlewares/schemas");
 
 const router = express.Router();
 
@@ -30,7 +32,7 @@ const createSession = async (userId, userType) => {
 };
 
 // Company Register
-router.post("/company_register", authLimiter, async (req, res) => {
+router.post("/company_register", authLimiter, validate(schemas.companyRegister), async (req, res) => {
   const { company_name, email, password, confirm, company_code } = req.body;
 
   let company = await Company.findOne({ email });
@@ -69,7 +71,7 @@ router.post("/company_register", authLimiter, async (req, res) => {
 });
 
 // Employee Register
-router.post("/employee_register", authLimiter, async (req, res) => {
+router.post("/employee_register", authLimiter, validate(schemas.employeeRegister), async (req, res) => {
   const {
     firstName,
     lastName,
@@ -160,7 +162,7 @@ router.post("/employee_register", authLimiter, async (req, res) => {
 });
 
 // Login
-router.post("/login", authLimiter, async (req, res) => {
+router.post("/login", authLimiter, validate(schemas.login), async (req, res) => {
   const { email, password } = req.body;
 
   try {
@@ -234,13 +236,12 @@ router.post("/login", authLimiter, async (req, res) => {
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 // forgot password
-router.post("/forgot_password", sensitiveActionLimiter, async (req, res) => {
+router.post("/forgot_password", sensitiveActionLimiter, validate(schemas.forgotPassword), async (req, res) => {
   const { email } = req.body;
-  if (!email) return res.status(400).json({ message: "Email is required" });
 
   try {
-    const employee = await Employee.findOne({ email: email.toLowerCase() });
-    const company = employee ? null : await Company.findOne({ email: email.toLowerCase() });
+    const employee = await Employee.findOne({ email });
+    const company = employee ? null : await Company.findOne({ email });
     const account = employee || company;
 
     if (account) {
@@ -266,11 +267,9 @@ router.post("/forgot_password", sensitiveActionLimiter, async (req, res) => {
 });
 
 // Reset password 
-router.post("/reset_password", sensitiveActionLimiter, async (req, res) => {
+router.post("/reset_password", sensitiveActionLimiter, validate(schemas.resetPassword), async (req, res) => {
   const { token, password, confirm } = req.body;
-  if (!token || !password) return res.status(400).json({ message: "Token and new password are required" });
   if (password !== confirm) return res.status(400).json({ message: "Passwords do not match" });
-  if (password.length < 8) return res.status(400).json({ message: "Password must be at least 8 characters" });
 
   try {
     const reset = await PasswordReset.findOne({ token });

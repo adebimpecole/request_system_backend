@@ -9,6 +9,8 @@ const CompanySchema = new mongoose.Schema({
     type: String,
     required: [true, "Please provide an email!"],
     unique: true,
+    lowercase: true,
+    trim: true,
     match: [/.+@.+\..+/, "Please enter a valid email address"],
   },
   password: {
@@ -18,6 +20,7 @@ const CompanySchema = new mongoose.Schema({
   company_code: {
     type: String,
     required: true,
+    unique: true, // the code employees use to join — must resolve to exactly one company
   },
   role: {
     type: String,

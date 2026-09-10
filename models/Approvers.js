@@ -4,6 +4,7 @@ const ApproversSchema = new mongoose.Schema({
   company_id: {
     type: String,
     required: true,
+    unique: true, 
   },
   verification_authority: {
     type: String,

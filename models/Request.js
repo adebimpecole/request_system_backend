@@ -14,9 +14,9 @@ const RequestSchema = new mongoose.Schema({
     },
   ],
   status: { type: String, required: true },
-  company_id: { type: mongoose.Schema.Types.ObjectId, ref: "Company", required: true },
-  user_id: { type: mongoose.Schema.Types.ObjectId, ref: "Employee", required: true },
-  request_id: { type: String, required: true },
+  company_id: { type: mongoose.Schema.Types.ObjectId, ref: "Company", required: true, index: true },
+  user_id: { type: mongoose.Schema.Types.ObjectId, ref: "Employee", required: true, index: true },
+  request_id: { type: String, required: true, unique: true },
   department: { type: String, required: true },
 
   // 0=dept_head_review, 1=funding_approver, 2=dept_head_delegate, 3=verification, 4=complete
@@ -46,5 +46,7 @@ const RequestSchema = new mongoose.Schema({
 
   date_created: { type: Date, required: true },
 }, { timestamps: true });
+
+RequestSchema.index({ company_id: 1, status: 1 });
 
 module.exports = mongoose.model("Request", RequestSchema);

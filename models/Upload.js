@@ -6,6 +6,7 @@ const UploadSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Company",
       required: true,
+      index: true,
     },
     uploaded_by: {
       type: mongoose.Schema.Types.ObjectId,

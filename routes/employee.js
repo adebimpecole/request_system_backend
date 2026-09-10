@@ -12,11 +12,12 @@ const Request = require("../models/Request");
 const { sendInviteEmail } = require("../utils/mailer");
 const { sensitiveActionLimiter } = require("../middlewares/rateLimit");
 const { logActivity } = require("../utils/auditLog");
+const validate = require("../middlewares/validate");
+const schemas = require("../middlewares/schemas");
 
 const router = express.Router();
 
 const INVITE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
-const UPDATABLE_EMPLOYEE_FIELDS = ["first_name", "last_name", "department", "email"];
 
 
 // Resolve an invite token
@@ -47,12 +48,8 @@ router.get("/invite/:token", sensitiveActionLimiter, async (req, res) => {
 router.use(verifyToken, loadActor);
 
 // Invite a new user by email
-router.post("/invite", sensitiveActionLimiter, async (req, res) => {
+router.post("/invite", sensitiveActionLimiter, validate(schemas.inviteEmployee), async (req, res) => {
   const { email, department, company_id } = req.body;
-
-  if (!email || !company_id) {
-    return res.status(400).json({ message: "email and company_id are required" });
-  }
 
   if (req.actor.company_id !== String(company_id)) {
     return res.status(403).json({ message: "You do not have access to this company's data" });
@@ -120,8 +117,8 @@ router.post("/invite", sensitiveActionLimiter, async (req, res) => {
 });
 
 // Revoke or restore employee ability to submit requests
-router.post("/:id/revoke", requireRole("admin", "department_head"), async (req, res) => {
-  const { suspend } = req.body; 
+router.post("/:id/revoke", requireRole("admin", "department_head"), validate(schemas.revokeEmployee), async (req, res) => {
+  const { suspend } = req.body;
   try {
     const employee = await Employee.findById(req.params.id);
     if (!employee) return res.status(404).json({ message: "Employee not found" });
@@ -201,22 +198,17 @@ router.delete("/:id", requireRole("admin", "department_head"), async (req, res) 
 });
 
 // Update employee info 
-router.post("/:id", async (req, res) => {
+router.post("/:id", validate(schemas.updateEmployee), async (req, res) => {
   const id = req.params.id;
 
   if (req.actor.type !== "employee" || req.actor.id !== id) {
     return res.status(403).json({ message: "You can only update your own profile" });
   }
 
-  const updates = {};
-  for (const field of UPDATABLE_EMPLOYEE_FIELDS) {
-    if (req.body[field] !== undefined) updates[field] = req.body[field];
-  }
-
   try {
     let employee = await Employee.findByIdAndUpdate(
       id,
-      { $set: updates },
+      { $set: req.body },
       { new: true, useFindAndModify: false },
     ).select("-password");
 
@@ -254,7 +246,7 @@ router.get("/:id", async (req, res) => {
   }
 });
 
-// get employee requests 
+// get employee requests
 router.get("/requests/:id", async (req, res) => {
   const id = req.params.id;
 
@@ -263,8 +255,25 @@ router.get("/requests/:id", async (req, res) => {
   }
 
   try {
-    const requests = await Request.find({ user_id: id });
-    return res.json(requests);
+    const { page, limit } = req.query;
+
+    if (page === undefined && limit === undefined) {
+      const requests = await Request.find({ user_id: id });
+      return res.json(requests);
+    }
+
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
+
+    const [data, total] = await Promise.all([
+      Request.find({ user_id: id })
+        .sort({ date_created: -1 })
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum),
+      Request.countDocuments({ user_id: id }),
+    ]);
+
+    return res.json({ data, total, page: pageNum, pages: Math.ceil(total / limitNum) });
   } catch (err) {
     console.error(err.message);
     res.status(500).send("Server error");

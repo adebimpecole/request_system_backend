@@ -10,25 +10,22 @@ const Request = require("../models/Request");
 const Approvers = require("../models/Approvers");
 const Departments = require("../models/Departments");
 const { logActivity } = require("../utils/auditLog");
+const validate = require("../middlewares/validate");
+const schemas = require("../middlewares/schemas");
 
 const router = express.Router();
-
-const UPDATABLE_COMPANY_FIELDS = ["company_name", "budget", "profile_picture"];
 
 router.use(verifyToken, loadActor);
 
 // Update company info
-router.put("/:id", async (req, res) => {
+router.put("/:id", validate(schemas.updateCompany), async (req, res) => {
   const companyId = req.params.id;
 
   if (req.actor.type !== "company" || req.actor.id !== companyId) {
     return res.status(403).json({ message: "You can only update your own company" });
   }
 
-  const updates = {};
-  for (const field of UPDATABLE_COMPANY_FIELDS) {
-    if (req.body[field] !== undefined) updates[field] = req.body[field];
-  }
+  const updates = req.body;
 
   try {
     const before = await Company.findById(companyId).select("budget");
@@ -59,25 +56,6 @@ router.put("/:id", async (req, res) => {
     }
 
     return res.json(company);
-  } catch (err) {
-    console.error(err.message);
-    res.status(500).send("Server error");
-  }
-});
-
-// get employees
-router.get("/:id", verifySameCompany("params:id"), async (req, res) => {
-  const id = req.params.id;
-  try {
-    const employees = await Employee.find({ company_id: id });
-
-    if (employees.length === 0) {
-      return res
-        .status(404)
-        .json({ msg: "No employee exists for this company" });
-    }
-
-    return res.json(employees);
   } catch (err) {
     console.error(err.message);
     res.status(500).send("Server error");
@@ -146,35 +124,32 @@ router.get("/get_company/:code",  async (req, res) => {
 });
 
 // get company requests
+
 router.get("/requests/:id", verifySameCompany("params:id"), requireRole("admin", "department_head", "approver"), async (req, res) => {
   const id = req.params.id;
   try {
-    const requests = await Request.find({ company_id: id });
+    const { page, limit } = req.query;
 
-    if (requests.length === 0) {
-      return res.status(404).json({ msg: "No request has been made" });
+    if (page === undefined && limit === undefined) {
+      const requests = await Request.find({ company_id: id });
+      if (requests.length === 0) {
+        return res.status(404).json({ msg: "No request has been made" });
+      }
+      return res.json(requests);
     }
 
-    return res.json(requests);
-  } catch (err) {
-    console.error(err.message);
-    res.status(500).send("Server error");
-  }
-});
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
 
-// get company emplyees
-router.get("/employees/:id", verifySameCompany("params:id"), async (req, res) => {
-  const id = req.params.id;
-  try {
-    const employees = await Employee.find({ company_id: id });
+    const [data, total] = await Promise.all([
+      Request.find({ company_id: id })
+        .sort({ date_created: -1 })
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum),
+      Request.countDocuments({ company_id: id }),
+    ]);
 
-    if (employees.length === 0) {
-      return res
-        .status(404)
-        .json({ msg: "No employee exists for this company" });
-    }
-
-    return res.json(employees);
+    return res.json({ data, total, page: pageNum, pages: Math.ceil(total / limitNum) });
   } catch (err) {
     console.error(err.message);
     res.status(500).send("Server error");

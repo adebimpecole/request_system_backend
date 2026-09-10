@@ -7,8 +7,11 @@ const verifyToken = require("../middlewares/verifyToken");
 const loadActor = require("../middlewares/loadActor");
 const verifySameCompany = require("../middlewares/verifySameCompany");
 const requireRole = require("../middlewares/requireRole");
+const validate = require("../middlewares/validate");
+const schemas = require("../middlewares/schemas");
 const { notifyUser } = require("../utils/socket");
 const { logActivity } = require("../utils/auditLog");
+const crypto = require("crypto");
 
 const router = express.Router();
 
@@ -62,11 +65,8 @@ router.use(verifyToken);
 // Stage 2  dept_head_delegate→ Dept head attaches proof_of_use
 // Stage 3  verification      → Verification approver confirms fund use
 //
-router.post("/:request_id/approve", async (req, res) => {
+router.post("/:request_id/approve", validate(schemas.approveRequest), async (req, res) => {
   const { action, proof, note } = req.body; // action: "approve"|"reject"
-  if (!["approve", "reject"].includes(action)) {
-    return res.status(400).json({ message: "action must be 'approve' or 'reject'" });
-  }
 
   try {
     const request = await Request.findOne({ request_id: req.params.request_id });
@@ -269,9 +269,8 @@ router.post("/:request_id/approve", async (req, res) => {
 });
 
 // request clarification from the requester 
-router.post("/:request_id/clarify", async (req, res) => {
+router.post("/:request_id/clarify", validate(schemas.clarifyRequest), async (req, res) => {
   const { question } = req.body;
-  if (!question) return res.status(400).json({ message: "question is required" });
 
   try {
     const request = await Request.findOne({ request_id: req.params.request_id });
@@ -340,9 +339,8 @@ router.post("/:request_id/clarify", async (req, res) => {
 });
 
 // respond to clarification 
-router.post("/:request_id/respond", async (req, res) => {
+router.post("/:request_id/respond", validate(schemas.respondClarification), async (req, res) => {
   const { response } = req.body;
-  if (!response) return res.status(400).json({ message: "response is required" });
 
   try {
     const request = await Request.findOne({ request_id: req.params.request_id });
@@ -484,13 +482,17 @@ router.post("/:request_id/close", async (req, res) => {
 router.use(loadActor);
 
 // create request
-router.post("/new_request", async (req, res) => {
+router.post("/new_request", validate(schemas.newRequest), async (req, res) => {
   try {
-    const request = { ...req.body, company_id: req.actor.company_id, user_id: req.actor.id };
+    const request = {
+      ...req.body,
+      company_id: req.actor.company_id,
+      user_id: req.actor.id,
+      request_id: crypto.randomBytes(4).toString("hex"),
+      status: "pending",
+      date_created: new Date(),
+    };
 
-    // If the amount alone exceeds the entire budget, it can never be
-    // approved regardless of what else gets rejected/frees up later — catch
-    // that at submission instead of letting it sit in the queue forever.
     const { budget } = await getBudgetStatus(request.company_id);
     const requestedAmount = parseFloat(request.amount) || 0;
     if (budget > 0 && requestedAmount > budget) {
@@ -551,10 +553,8 @@ router.post("/new_request", async (req, res) => {
 });
 
 //  admin status override 
-router.patch("/:id/status", requireRole("admin"), async (req, res) => {
+router.patch("/:id/status", requireRole("admin"), validate(schemas.statusOverride), async (req, res) => {
   const { status, message } = req.body;
-  const VALID = ["pending", "approved", "rejected", "under_review", "funded", "delegated", "closed"];
-  if (!VALID.includes(status)) return res.status(400).json({ message: "Invalid status" });
 
   try {
     const existing = await Request.findById(req.params.id);

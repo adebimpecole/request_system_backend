@@ -10,11 +10,13 @@ const verifyToken = require("../middlewares/verifyToken");
 const loadActor = require("../middlewares/loadActor");
 const requireRole = require("../middlewares/requireRole");
 const { logActivity } = require("../utils/auditLog");
+const validate = require("../middlewares/validate");
+const schemas = require("../middlewares/schemas");
 
 const router = express.Router();
 
 // Update department info
-router.post("/add_department", verifyToken, loadActor, requireRole("admin", "approver"), async (req, res) => {
+router.post("/add_department", verifyToken, loadActor, requireRole("admin", "approver"), validate(schemas.addDepartment), async (req, res) => {
   const { company_id, departments } = req.body;
 
   if (req.actor.company_id !== String(company_id)) {
@@ -59,14 +61,14 @@ router.post("/add_department", verifyToken, loadActor, requireRole("admin", "app
 });
 
 // Merge one department into another
-router.post("/merge", verifyToken, loadActor, requireRole("admin"), async (req, res) => {
+router.post("/merge", verifyToken, loadActor, requireRole("admin"), validate(schemas.mergeDepartments), async (req, res) => {
   const { company_id, from, into } = req.body;
 
   if (req.actor.company_id !== String(company_id)) {
     return res.status(403).json({ message: "You do not have access to this company's data" });
   }
 
-  if (!from || !into || from === into) {
+  if (from === into) {
     return res.status(400).json({ message: "Choose two different departments to merge." });
   }
 
