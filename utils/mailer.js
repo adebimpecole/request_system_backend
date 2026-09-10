@@ -6,15 +6,17 @@ const transporter = nodemailer.createTransport({
   secure: process.env.SMTP_SECURE === "true", // true for port 465
   auth: {
     user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
+    pass: process.env.SMTP_PASSWORD,
   },
 });
 
 
+// Returns whether the email actually sent, so callers can tell "not
+// configured" apart from "configured and sent" instead of assuming success.
 const sendMail = async ({ to, subject, html }) => {
   if (!process.env.SMTP_HOST || !process.env.SMTP_USER) {
     console.warn("[mailer] SMTP not configured — skipping email to", to);
-    return;
+    return false;
   }
   await transporter.sendMail({
     from: process.env.SMTP_FROM || `"FinReq" <${process.env.SMTP_USER}>`,
@@ -22,12 +24,13 @@ const sendMail = async ({ to, subject, html }) => {
     subject,
     html,
   });
+  return true;
 };
 
 const sendInviteEmail = async ({ to, inviteLink, companyName, invitedByName }) => {
   const fullLink = `${process.env.CLIENT_URL || "http://localhost:5173"}${inviteLink}`;
-  await sendMail({
-    to,
+  return sendMail({
+    to, 
     subject: `You've been invited to join ${companyName} on FinReq`,
     html: `
       <div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:32px 24px;color:#1e293b">
@@ -53,7 +56,7 @@ const sendInviteEmail = async ({ to, inviteLink, companyName, invitedByName }) =
 
 const sendPasswordResetEmail = async ({ to, resetLink }) => {
   const fullLink = `${process.env.CLIENT_URL || "http://localhost:5173"}${resetLink}`;
-  await sendMail({
+  return sendMail({
     to,
     subject: "Reset your FinReq password",
     html: `

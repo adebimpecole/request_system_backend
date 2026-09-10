@@ -11,6 +11,7 @@ const requireRole = require("../middlewares/requireRole");
 const Request = require("../models/Request");
 const { sendInviteEmail } = require("../utils/mailer");
 const { sensitiveActionLimiter } = require("../middlewares/rateLimit");
+const { logActivity } = require("../utils/auditLog");
 
 const router = express.Router();
 
@@ -47,7 +48,7 @@ router.use(verifyToken, loadActor);
 
 // Invite a new user by email
 router.post("/invite", sensitiveActionLimiter, async (req, res) => {
-  const { email, department, company_id, invited_by } = req.body;
+  const { email, department, company_id } = req.body;
 
   if (!email || !company_id) {
     return res.status(400).json({ message: "email and company_id are required" });
@@ -75,21 +76,43 @@ router.post("/invite", sensitiveActionLimiter, async (req, res) => {
       company_id,
       department: department || "",
       token,
-      invitedBy: invited_by || null,
+      // The real ObjectId of whoever is authenticated — never trust a
+      // client-supplied value here, and never a raw name string (this field
+      // is a proper reference, not a display field).
+      invitedBy: req.actor.type === "employee" ? req.actor.id : null,
       expiresAt,
     });
 
     const inviteLink = `/employeesignup?invite=${token}`;
 
-    //  forget email 
-    sendInviteEmail({
-      to: email.toLowerCase(),
-      inviteLink,
-      companyName: company.company_name,
-      invitedByName: invited_by || null,
-    }).catch((err) => console.error("[invite email]", err.message));
+    await logActivity({
+      company_id,
+      actor_id: req.actor.id,
+      actor_type: req.actor.type,
+      actor_name: req.actor.name,
+      action: "employee.invited",
+      target_type: "employee",
+      target_id: "",
+      target_label: email.toLowerCase(),
+      message: `${req.actor.name} invited ${email.toLowerCase()}${department ? ` to ${department}` : ""}.`,
+      metadata: { email: email.toLowerCase(), department: department || "" },
+    });
 
-    return res.status(200).json({ message: "Invite created", inviteLink, expiresAt });
+    let emailSent = false;
+    try {
+      emailSent = await sendInviteEmail({
+        to: email.toLowerCase(),
+        inviteLink,
+        companyName: company.company_name,
+        // Server-verified display name, not client input — matches whoever
+        // actually authenticated this request.
+        invitedByName: req.actor.name,
+      });
+    } catch (err) {
+      console.error("[invite email]", err.message);
+    }
+
+    return res.status(200).json({ message: "Invite created", inviteLink, expiresAt, emailSent });
   } catch (err) {
     console.error(err.message);
     res.status(500).json({ message: "Server error" });
@@ -110,6 +133,19 @@ router.post("/:id/revoke", requireRole("admin", "department_head"), async (req, 
     employee.status = suspend ? "suspended" : "active";
     await employee.save();
 
+    await logActivity({
+      company_id: req.actor.company_id,
+      actor_id: req.actor.id,
+      actor_type: req.actor.type,
+      actor_name: req.actor.name,
+      action: suspend ? "employee.revoked" : "employee.restored",
+      target_type: "employee",
+      target_id: String(employee._id),
+      target_label: `${employee.first_name} ${employee.last_name}`,
+      message: `${req.actor.name} ${suspend ? "revoked" : "restored"} request rights for ${employee.first_name} ${employee.last_name}.`,
+      metadata: {},
+    });
+
     return res.status(200).json({ message: suspend ? "Request rights revoked" : "Request rights restored" });
   } catch (err) {
     console.error(err.message);
@@ -128,6 +164,19 @@ router.delete("/:id", requireRole("admin", "department_head"), async (req, res) 
     }
 
     const employee = await Employee.findByIdAndDelete(req.params.id);
+
+    await logActivity({
+      company_id: req.actor.company_id,
+      actor_id: req.actor.id,
+      actor_type: req.actor.type,
+      actor_name: req.actor.name,
+      action: "employee.removed",
+      target_type: "employee",
+      target_id: String(employee._id),
+      target_label: `${employee.first_name} ${employee.last_name}`,
+      message: `${req.actor.name} removed ${employee.first_name} ${employee.last_name} from the organization.`,
+      metadata: { email: employee.email },
+    });
 
     await BlockedUser.findOneAndUpdate(
       { email: employee.email.toLowerCase(), company_id: employee.company_id },

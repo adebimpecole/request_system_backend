@@ -2,11 +2,13 @@ const express = require("express");
 const Employee = require("../models/Employee");
 const Approvers = require("../models/Approvers");
 const Request = require("../models/Request");
+const Company = require("../models/Company");
 const verifyToken = require("../middlewares/verifyToken");
 const loadActor = require("../middlewares/loadActor");
 const verifySameCompany = require("../middlewares/verifySameCompany");
 const requireRole = require("../middlewares/requireRole");
 const { notifyUser } = require("../utils/socket");
+const { logActivity } = require("../utils/auditLog");
 
 const router = express.Router();
 
@@ -24,6 +26,30 @@ const notifyApproversByEmail = async (company_id, emailList, payload) => {
   }).select("_id");
   for (const emp of employees) notifyUser(String(emp._id), payload);
 };
+
+const getBudgetStatus = async (company_id) => {
+  const company = await Company.findById(company_id).select("budget");
+  const budget = company?.budget || 0;
+  if (budget <= 0) return { budget: 0, disbursed: 0, remaining: Infinity };
+
+  const approvedRequests = await Request.find({ company_id, status: "approved" }).select("amount");
+  const disbursed = approvedRequests.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0);
+  return { budget, disbursed, remaining: budget - disbursed };
+};
+
+const logRequestActivity = (request, actor, { action, message, metadata }) =>
+  logActivity({
+    company_id: request.company_id,
+    actor_id: actor._id,
+    actor_type: "employee",
+    actor_name: `${actor.first_name} ${actor.last_name}`,
+    action,
+    target_type: "request",
+    target_id: request.request_id,
+    target_label: request.title,
+    message,
+    metadata,
+  });
 
 
 
@@ -78,6 +104,18 @@ router.post("/:request_id/approve", async (req, res) => {
       if (action === "approve" && !proof) {
         return res.status(400).json({ message: "Proof of delegated funds is required" });
       }
+      // Delegating funds is the actual point money gets committed — enforce
+      // the budget here, not at request creation (other pending requests may
+      // still be rejected and free up room by the time this one gets here).
+      if (action === "approve") {
+        const { budget, disbursed, remaining } = await getBudgetStatus(request.company_id);
+        const thisAmount = parseFloat(request.amount) || 0;
+        if (budget > 0 && thisAmount > remaining) {
+          return res.status(400).json({
+            message: `Delegating funds for this request ($${thisAmount.toLocaleString()}) would exceed the remaining budget ($${Math.max(remaining, 0).toLocaleString()} of $${budget.toLocaleString()} left, $${disbursed.toLocaleString()} already disbursed).`,
+          });
+        }
+      }
     } else if (approval_index === 2) {
       if (actor.role !== "department_head" || actor.department !== request.department) {
         return res.status(403).json({ message: "Only the department head for this department can act here" });
@@ -91,10 +129,15 @@ router.post("/:request_id/approve", async (req, res) => {
       }
     }
 
-    // rejection (any stage) 
+    // rejection (any stage)
     if (action === "reject") {
       request.status = "rejected";
       await request.save();
+      await logRequestActivity(request, actor, {
+        action: "request.rejected",
+        message: `${actor.first_name} ${actor.last_name} rejected the request${note ? `: "${note}"` : "."}`,
+        metadata: { stage: approval_index, note: note || "" },
+      });
       notifyUser(String(request.user_id), {
         type: "request_update",
         title: "Request rejected",
@@ -107,10 +150,15 @@ router.post("/:request_id/approve", async (req, res) => {
 
     //  Advance
     if (approval_index === 0) {
-      // Dept head initial approval 
+      // Dept head initial approval
       request.approval_index = 1;
       request.status = "under_review";
       await request.save();
+      await logRequestActivity(request, actor, {
+        action: "request.approved",
+        message: `${actor.first_name} ${actor.last_name} approved the initial department review.`,
+        metadata: { stage: 0 },
+      });
 
       if (approversDoc?.funding_authority) {
         await notifyApproversByEmail(request.company_id, [approversDoc.funding_authority], {
@@ -132,11 +180,16 @@ router.post("/:request_id/approve", async (req, res) => {
     }
 
     if (approval_index === 1) {
-      // Funding approver attaches proof 
+      // Funding approver attaches proof
       request.proof_of_funds = proof;
       request.approval_index = 2;
       request.status = "funded";
       await request.save();
+      await logRequestActivity(request, actor, {
+        action: "request.approved",
+        message: `${actor.first_name} ${actor.last_name} attached proof of delegated funds and forwarded the request to the department head.`,
+        metadata: { stage: 1, proof },
+      });
 
       // notify dept head
       const deptHead = await Employee.findOne({
@@ -164,11 +217,16 @@ router.post("/:request_id/approve", async (req, res) => {
     }
 
     if (approval_index === 2) {
-      // Dept head attaches proof of use 
+      // Dept head attaches proof of use
       request.proof_of_use = proof;
       request.approval_index = 3;
       request.status = "delegated";
       await request.save();
+      await logRequestActivity(request, actor, {
+        action: "request.approved",
+        message: `${actor.first_name} ${actor.last_name} attached proof of fund use and forwarded the request for verification.`,
+        metadata: { stage: 2, proof },
+      });
 
       if (approversDoc?.verification_authority) {
         await notifyApproversByEmail(request.company_id, [approversDoc.verification_authority], {
@@ -183,10 +241,15 @@ router.post("/:request_id/approve", async (req, res) => {
     }
 
     if (approval_index === 3) {
-      // Verification approver confirms 
+      // Verification approver confirms
       request.approval_index = 4;
       request.status = "approved";
       await request.save();
+      await logRequestActivity(request, actor, {
+        action: "request.approved",
+        message: `${actor.first_name} ${actor.last_name} verified fund use — the request is now fully approved.`,
+        metadata: { stage: 3 },
+      });
 
       notifyUser(String(request.user_id), {
         type: "request_update",
@@ -238,6 +301,11 @@ router.post("/:request_id/clarify", async (req, res) => {
     request.pre_clarification_status = request.status;
     request.status = "clarification_needed";
     await request.save();
+    await logRequestActivity(request, actor, {
+      action: "request.clarification_requested",
+      message: `${actor.first_name} ${actor.last_name} requested clarification: "${question}"`,
+      metadata: { question },
+    });
 
     if (isDeptHead) {
       notifyUser(String(request.user_id), {
@@ -317,6 +385,11 @@ router.post("/:request_id/respond", async (req, res) => {
     request.status = request.pre_clarification_status || "pending";
     request.pre_clarification_status = "";
     await request.save();
+    await logRequestActivity(request, actor, {
+      action: "request.clarification_responded",
+      message: `${actor.first_name} ${actor.last_name} responded to the clarification: "${response}"`,
+      metadata: { response },
+    });
 
     // Notify whoever originally asked
     notifyUser(String(pending.asked_by), {
@@ -367,6 +440,11 @@ router.post("/:request_id/close", async (req, res) => {
     request.closed_at = new Date();
     request.closed_by = actor._id;
     await request.save();
+    await logRequestActivity(request, actor, {
+      action: "request.closed",
+      message: `${actor.first_name} ${actor.last_name} closed the request.`,
+      metadata: {},
+    });
 
     // Notify the other party
     if (isRequester) {
@@ -405,10 +483,21 @@ router.post("/:request_id/close", async (req, res) => {
 
 router.use(loadActor);
 
-// create request 
+// create request
 router.post("/new_request", async (req, res) => {
   try {
     const request = { ...req.body, company_id: req.actor.company_id, user_id: req.actor.id };
+
+    // If the amount alone exceeds the entire budget, it can never be
+    // approved regardless of what else gets rejected/frees up later — catch
+    // that at submission instead of letting it sit in the queue forever.
+    const { budget } = await getBudgetStatus(request.company_id);
+    const requestedAmount = parseFloat(request.amount) || 0;
+    if (budget > 0 && requestedAmount > budget) {
+      return res.status(400).json({
+        message: `This request ($${requestedAmount.toLocaleString()}) exceeds your organization's total budget ($${budget.toLocaleString()}) and can never be approved.`,
+      });
+    }
 
     const deptHead = await Employee.findOne({
       company_id: request.company_id,
@@ -418,6 +507,19 @@ router.post("/new_request", async (req, res) => {
 
     const initialIndex = deptHead ? 0 : 1;
     const newRequest = await Request.create({ ...request, approval_index: initialIndex });
+
+    await logActivity({
+      company_id: req.actor.company_id,
+      actor_id: req.actor.id,
+      actor_type: req.actor.type,
+      actor_name: req.actor.name,
+      action: "request.created",
+      target_type: "request",
+      target_id: newRequest.request_id,
+      target_label: newRequest.title,
+      message: `${req.actor.name} submitted a new request: "${newRequest.title}" for $${requestedAmount.toLocaleString()}.`,
+      metadata: { amount: newRequest.amount, category: newRequest.category, department: newRequest.department },
+    });
 
     if (deptHead) {
       notifyUser(String(deptHead._id), {
@@ -462,6 +564,18 @@ router.patch("/:id/status", requireRole("admin"), async (req, res) => {
     }
 
     const request = await Request.findByIdAndUpdate(req.params.id, { $set: { status } }, { new: true });
+    await logActivity({
+      company_id: req.actor.company_id,
+      actor_id: req.actor.id,
+      actor_type: req.actor.type,
+      actor_name: req.actor.name,
+      action: "request.status_overridden",
+      target_type: "request",
+      target_id: request.request_id,
+      target_label: request.title,
+      message: `${req.actor.name} manually changed the status to "${status}"${message ? `: ${message}` : "."}`,
+      metadata: { status, note: message || "" },
+    });
     notifyUser(String(request.user_id), {
       type: "request_update",
       title: `Request ${status}`,

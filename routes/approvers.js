@@ -7,6 +7,7 @@ const verifyToken = require("../middlewares/verifyToken");
 const loadActor = require("../middlewares/loadActor");
 const requireRole = require("../middlewares/requireRole");
 const { notifyUser } = require("../utils/socket");
+const { logActivity } = require("../utils/auditLog");
 
 const router = express.Router();
 
@@ -87,6 +88,25 @@ router.post("/add_role", requireRole("admin"), async (req, res) => {
       { new: true, upsert: true },
     );
 
+    if (funding_authority !== undefined) {
+      await logActivity({
+        company_id, actor_id: req.actor.id, actor_type: req.actor.type, actor_name: req.actor.name,
+        action: "approver.funding_authority_assigned", target_type: "approver", target_id: company_id,
+        target_label: funding_authority || "(unassigned)",
+        message: `${req.actor.name} set the funding approver to ${funding_authority || "(unassigned)"}.`,
+        metadata: { funding_authority },
+      });
+    }
+    if (verification_authority !== undefined) {
+      await logActivity({
+        company_id, actor_id: req.actor.id, actor_type: req.actor.type, actor_name: req.actor.name,
+        action: "approver.verification_authority_assigned", target_type: "approver", target_id: company_id,
+        target_label: verification_authority || "(unassigned)",
+        message: `${req.actor.name} set the verification approver to ${verification_authority || "(unassigned)"}.`,
+        metadata: { verification_authority },
+      });
+    }
+
     await Promise.all([
       notifyOfPendingWork(company_id, 1, funding_authority, "funding"),
       notifyOfPendingWork(company_id, 3, verification_authority, "verification"),
@@ -140,6 +160,14 @@ router.post("/assign", requireRole("admin"), async (req, res) => {
       { new: true, upsert: true },
     );
 
+    await logActivity({
+      company_id, actor_id: req.actor.id, actor_type: req.actor.type, actor_name: req.actor.name,
+      action: "employee.role_assigned", target_type: "employee", target_id: String(employee._id),
+      target_label: `${employee.first_name} ${employee.last_name}`,
+      message: `${req.actor.name} made ${employee.first_name} ${employee.last_name} ${targetRole === "department_head" ? "department head" : "an approver"}${targetRole === "department_head" ? ` of ${employee.department}` : ""}.`,
+      metadata: { role: targetRole, department: employee.department },
+    });
+
     return res.status(200).json({ message: "Employee assigned as approver" });
   } catch (err) {
     console.error(err.message);
@@ -161,6 +189,7 @@ router.post("/unassign", requireRole("admin"), async (req, res) => {
       return res.status(404).json({ message: "Employee not found" });
     }
 
+    const previousRole = employee.role;
     employee.role = "requester";
     await employee.save();
 
@@ -171,6 +200,14 @@ router.post("/unassign", requireRole("admin"), async (req, res) => {
       if (approversDoc.verification_authority === employee.email) approversDoc.verification_authority = "";
       await approversDoc.save();
     }
+
+    await logActivity({
+      company_id, actor_id: req.actor.id, actor_type: req.actor.type, actor_name: req.actor.name,
+      action: "employee.role_unassigned", target_type: "employee", target_id: String(employee._id),
+      target_label: `${employee.first_name} ${employee.last_name}`,
+      message: `${req.actor.name} removed ${employee.first_name} ${employee.last_name} as ${previousRole === "department_head" ? "department head" : "an approver"}.`,
+      metadata: { previousRole },
+    });
 
     return res.status(200).json({ message: "Employee removed as approver" });
   } catch (err) {

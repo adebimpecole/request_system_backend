@@ -9,6 +9,7 @@ const Employee = require("../models/Employee");
 const Request = require("../models/Request");
 const Approvers = require("../models/Approvers");
 const Departments = require("../models/Departments");
+const { logActivity } = require("../utils/auditLog");
 
 const router = express.Router();
 
@@ -30,6 +31,8 @@ router.put("/:id", async (req, res) => {
   }
 
   try {
+    const before = await Company.findById(companyId).select("budget");
+
     const company = await Company.findByIdAndUpdate(
       companyId,
       { $set: updates },
@@ -38,6 +41,21 @@ router.put("/:id", async (req, res) => {
 
     if (!company) {
       return res.status(404).json({ msg: "User not found" });
+    }
+
+    if (updates.budget !== undefined && before?.budget !== company.budget) {
+      await logActivity({
+        company_id: companyId,
+        actor_id: req.actor.id,
+        actor_type: req.actor.type,
+        actor_name: req.actor.name,
+        action: "company.budget_updated",
+        target_type: "company",
+        target_id: companyId,
+        target_label: company.company_name,
+        message: `${req.actor.name} changed the budget from $${(before?.budget || 0).toLocaleString()} to $${company.budget.toLocaleString()}.`,
+        metadata: { before: before?.budget || 0, after: company.budget },
+      });
     }
 
     return res.json(company);

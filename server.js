@@ -10,7 +10,7 @@ const { initSocket } = require("./utils/socket");
 const app = express();
 const server = http.createServer(app);
 
-// Middleware
+// Middleware 
 app.use(
   cors({
     origin: process.env.CLIENT_URL || "http://localhost:5173",
@@ -33,6 +33,7 @@ app.use("/api/department", require("./routes/department"));
 app.use("/api/approver", require("./routes/approvers"));
 app.use("/api/request", require("./routes/request"));
 app.use("/api/upload", require("./routes/upload"));
+app.use("/api/audit", require("./routes/audit"));
 
 // Connect to MongoDB, then start HTTP server + Socket.io
 const PORT = process.env.PORT || 9000;

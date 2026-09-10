@@ -18,6 +18,7 @@ const loadActor = async (req, res, next) => {
         role: employee.role,
         department: employee.department,
         status: employee.status,
+        name: `${employee.first_name} ${employee.last_name}`,
       };
       return next();
     }
@@ -32,6 +33,7 @@ const loadActor = async (req, res, next) => {
         company_id: String(company._id),
         role: "admin",
         status: "active",
+        name: company.company_name,
       };
       return next();
     }

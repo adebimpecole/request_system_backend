@@ -9,6 +9,7 @@ const Approvers = require("../models/Approvers");
 const verifyToken = require("../middlewares/verifyToken");
 const loadActor = require("../middlewares/loadActor");
 const requireRole = require("../middlewares/requireRole");
+const { logActivity } = require("../utils/auditLog");
 
 const router = express.Router();
 
@@ -109,6 +110,14 @@ router.post("/merge", verifyToken, loadActor, requireRole("admin"), async (req, 
       { company_id },
       { $pull: { departments: { name: from } } },
     );
+
+    await logActivity({
+      company_id, actor_id: req.actor.id, actor_type: req.actor.type, actor_name: req.actor.name,
+      action: "department.merged", target_type: "department", target_id: from,
+      target_label: `${from} → ${into}`,
+      message: `${req.actor.name} merged ${from} into ${into} (${empResult.modifiedCount} member${empResult.modifiedCount === 1 ? "" : "s"} moved)${demoted ? `, ${demoted.name} is no longer department head` : ""}.`,
+      metadata: { from, into, employeesMoved: empResult.modifiedCount, requestsMoved: reqResult.modifiedCount, demoted },
+    });
 
     return res.status(200).json({
       message: "Departments merged",
