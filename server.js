@@ -4,7 +4,6 @@ const express = require("express");
 const http = require("http");
 const mongoose = require("mongoose");
 const cors = require("cors");
-const { engine } = require("express-handlebars");
 const { initSocket } = require("./utils/socket");
 
 const app = express();
@@ -18,12 +17,6 @@ app.use(
   }),
 );
 app.use(express.json());
-
-app.engine(
-  ".hbs",
-  engine({ extname: ".hbs", defaultLayout: false, layoutsDir: "views" }),
-);
-app.set("view engine", "hbs");
 
 // Routes
 app.use("/api/auth", require("./routes/auth"));
