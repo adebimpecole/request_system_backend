@@ -8,33 +8,21 @@ head, funding approver, department head again (proof of use), verification
 approver — before it's marked approved. Every step is timestamped and kept
 in a permanent audit trail.
 
-This document describes the backend only. The frontend has its own
-[README](../../request_system/README.md) (separate repository/folder).
-
----
-
-## Table of contents
-
-- [Tech stack](#tech-stack)
-- [How the domain model works](#how-the-domain-model-works)
-- [The approval chain](#the-approval-chain)
-- [Business rules](#business-rules)
-- [Getting started](#getting-started)
+This document describes the backend only.
 
 ---
 
 ## Tech stack
 
-| Concern | Tool | Notes |
-|---|---|---|
-| Runtime / framework | **Node.js + Express** | Plain REST API under `/api/*` |
-| Database | **MongoDB** | One database, tenant-scoped by `company_id` on every document |
+| Concern | Tool |
+|---|---|
+| Runtime / framework | **Node.js + Express** |
+| Database | **MongoDB** |
 ---
 
 ## How the domain model works
 
-FinReq is **multi-tenant**: a `Company` document is the tenant boundary.
-There are two kinds of authenticated principal ("actor"):
+FinReq is **multi-tenant**: There are two kinds of authenticated principal ("actor"):
 
 - **Company** — the account created at sign-up. Always has the `admin`
   role. Owns the organization's budget, departments, and approver
@@ -81,10 +69,6 @@ but only while it's still at `pending`/`under_review`/`clarification_needed`
 — once funds have been delegated (`delegated` or `approved`), closing is
 blocked, since money has already moved.
 
-An admin can also force a `status` directly via `PATCH /request/:id/status`
-— a manual override for edge cases, logged to the audit trail like every
-other action.
-
 ## Business rules
 
 - **Budget is enforced at two separate points**, not one:
@@ -109,26 +93,3 @@ other action.
   to that company + email) so they can't simply be re-invited or re-register
   into the same company after being removed, and strips them from any
   approver/funding/verification assignment.
-- **Mass-assignment is deliberately locked down** on request creation: a
-  client can only ever set `title`, `amount`, `category`, `description`,
-  `department`. Every other field on the `Request` document — `status`,
-  `approval_index`, `request_id`, `date_created` — is derived and set by the
-  server. (This used to not be the case; see the audit-trail commit history
-  if you're curious why it matters.)
-
-
-## Getting started
-
-```bash
-# 1. Install dependencies
-npm install
-
-# 2. Configure environment
-cp .env.example .env
-# then fill in .env 
-
-# 3. Run it
-npm run dev     # nodemon, restarts on file changes
-# or
-npm start       # plain node, for production
-```
