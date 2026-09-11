@@ -4,6 +4,10 @@ const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
   port: Number(process.env.SMTP_PORT) || 587,
   secure: process.env.SMTP_SECURE === "true", // true for port 465
+  // Some hosts (Render, Railway, ...) resolve the SMTP host to an IPv6
+  // address they can't actually route outbound traffic to, so the
+  // connection just hangs until it times out. Forcing IPv4 avoids that.
+  family: 4,
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASSWORD,

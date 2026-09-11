@@ -9,7 +9,14 @@ const { initSocket } = require("./utils/socket");
 const app = express();
 const server = http.createServer(app);
 
-// Middleware 
+// Render (and most PaaS hosts) put the app behind one reverse-proxy hop,
+// which sets X-Forwarded-For. Express ignores that header by default, which
+// makes express-rate-limit throw when it tries to read the real client IP —
+// trusting exactly one hop tells Express to use it (and only it), without
+// trusting an arbitrary chain a client could spoof.
+app.set("trust proxy", 1);
+
+// Middleware
 app.use(
   cors({
     origin: process.env.CLIENT_URL || "http://localhost:5173",
