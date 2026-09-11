@@ -37,8 +37,7 @@ app.use("/api/audit", require("./routes/audit"));
 
 // Connect to MongoDB, then start HTTP server + Socket.io
 const PORT = process.env.PORT || 9000;
-const DB_URL = "mongodb://localhost:27017/request-system";
-// const DB_URL = process.env.DB_URL || "mongodb://localhost:27017/request-system";
+const DB_URL = process.env.DB_URL || "mongodb://localhost:27017/request-system";
 
 mongoose
   .connect(DB_URL)
