@@ -4,9 +4,6 @@ const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
   port: Number(process.env.SMTP_PORT) || 587,
   secure: process.env.SMTP_SECURE === "true", // true for port 465
-  // Some hosts (Render, Railway, ...) resolve the SMTP host to an IPv6
-  // address they can't actually route outbound traffic to, so the
-  // connection just hangs until it times out. Forcing IPv4 avoids that.
   family: 4,
   auth: {
     user: process.env.SMTP_USER,
@@ -14,12 +11,43 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+const parseFrom = (raw, fallbackEmail) => {
+  const match = /^\s*"?([^"<]*)"?\s*<(.+)>\s*$/.exec(raw || "");
+  if (match) return { name: match[1].trim() || "FinReq", email: match[2].trim() };
+  return { name: "FinReq", email: (raw || fallbackEmail || "").trim() };
+};
 
-// Returns whether the email actually sent, so callers can tell "not
-// configured" apart from "configured and sent" instead of assuming success.
+
+const sendViaBrevoApi = async ({ to, subject, html }) => {
+  const sender = parseFrom(process.env.SMTP_FROM, process.env.SMTP_USER);
+  const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: {
+      "api-key": process.env.BREVO_API_KEY,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({
+      sender,
+      to: [{ email: to }],
+      subject,
+      htmlContent: html,
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Brevo API ${res.status}: ${body.slice(0, 300)}`);
+  }
+};
+
 const sendMail = async ({ to, subject, html }) => {
+  if (process.env.BREVO_API_KEY) {
+    await sendViaBrevoApi({ to, subject, html });
+    return true;
+  }
+
   if (!process.env.SMTP_HOST || !process.env.SMTP_USER) {
-    console.warn("[mailer] SMTP not configured — skipping email to", to);
+    console.warn("[mailer] Neither BREVO_API_KEY nor SMTP is configured — skipping email to", to);
     return false;
   }
   await transporter.sendMail({
