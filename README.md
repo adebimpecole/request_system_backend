@@ -1,6 +1,6 @@
-# FinReq — Backend
+# Prequisa — Backend
 
-The API and real-time server for **FinReq**, a multi-tenant financial
+The API and real-time server for **Prequisa**, a multi-tenant financial
 requisition (expense/purchase approval) system. A company registers an
 account, invites its employees, and every financial request an employee
 raises then moves through a fixed, budget-aware approval chain — department
@@ -22,7 +22,7 @@ This document describes the backend only.
 
 ## How the domain model works
 
-FinReq is **multi-tenant**: There are two kinds of authenticated principal ("actor"):
+Prequisa is **multi-tenant**: There are two kinds of authenticated principal ("actor"):
 
 - **Company** — the account created at sign-up. Always has the `admin`
   role. Owns the organization's budget, departments, and approver

@@ -13,8 +13,8 @@ const transporter = nodemailer.createTransport({
 
 const parseFrom = (raw, fallbackEmail) => {
   const match = /^\s*"?([^"<]*)"?\s*<(.+)>\s*$/.exec(raw || "");
-  if (match) return { name: match[1].trim() || "FinReq", email: match[2].trim() };
-  return { name: "FinReq", email: (raw || fallbackEmail || "").trim() };
+  if (match) return { name: match[1].trim() || "Prequisa", email: match[2].trim() };
+  return { name: "Prequisa", email: (raw || fallbackEmail || "").trim() };
 };
 
 
@@ -51,7 +51,7 @@ const sendMail = async ({ to, subject, html }) => {
     return false;
   }
   await transporter.sendMail({
-    from: process.env.SMTP_FROM || `"FinReq" <${process.env.SMTP_USER}>`,
+    from: process.env.SMTP_FROM || `"Prequisa" <${process.env.SMTP_USER}>`,
     to,
     subject,
     html,
@@ -63,13 +63,13 @@ const sendInviteEmail = async ({ to, inviteLink, companyName, invitedByName }) =
   const fullLink = `${process.env.CLIENT_URL || "http://localhost:5173"}${inviteLink}`;
   return sendMail({
     to, 
-    subject: `You've been invited to join ${companyName} on FinReq`,
+    subject: `You've been invited to join ${companyName} on Prequisa`,
     html: `
       <div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:32px 24px;color:#1e293b">
         <h2 style="font-size:22px;font-weight:700;margin-bottom:8px">You're invited!</h2>
         <p style="color:#475569;margin-bottom:24px">
           ${invitedByName ? `<strong>${invitedByName}</strong> has invited you to join` : "You've been invited to join"}
-          <strong> ${companyName}</strong> on FinReq — a financial requisition management platform.
+          <strong> ${companyName}</strong> on Prequisa — a financial requisition management platform.
         </p>
         <a href="${fullLink}"
            style="display:inline-block;background:#4f46e5;color:#fff;font-weight:600;font-size:14px;
@@ -80,7 +80,7 @@ const sendInviteEmail = async ({ to, inviteLink, companyName, invitedByName }) =
           This link expires in 24 hours. If you weren't expecting this, you can ignore it.
         </p>
         <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0" />
-        <p style="color:#cbd5e1;font-size:12px">© ${new Date().getFullYear()} FinReq</p>
+        <p style="color:#cbd5e1;font-size:12px">© ${new Date().getFullYear()} Prequisa</p>
       </div>
     `,
   });
@@ -90,12 +90,12 @@ const sendPasswordResetEmail = async ({ to, resetLink }) => {
   const fullLink = `${process.env.CLIENT_URL || "http://localhost:5173"}${resetLink}`;
   return sendMail({
     to,
-    subject: "Reset your FinReq password",
+    subject: "Reset your Prequisa password",
     html: `
       <div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:32px 24px;color:#1e293b">
         <h2 style="font-size:22px;font-weight:700;margin-bottom:8px">Reset your password</h2>
         <p style="color:#475569;margin-bottom:24px">
-          We received a request to reset the password on your FinReq account. Click below to choose a new one.
+          We received a request to reset the password on your Prequisa account. Click below to choose a new one.
         </p>
         <a href="${fullLink}"
            style="display:inline-block;background:#4f46e5;color:#fff;font-weight:600;font-size:14px;
@@ -106,7 +106,7 @@ const sendPasswordResetEmail = async ({ to, resetLink }) => {
           This link expires in 1 hour. If you didn't request this, you can safely ignore it — your password won't change.
         </p>
         <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0" />
-        <p style="color:#cbd5e1;font-size:12px">© ${new Date().getFullYear()} FinReq</p>
+        <p style="color:#cbd5e1;font-size:12px">© ${new Date().getFullYear()} Prequisa</p>
       </div>
     `,
   });
