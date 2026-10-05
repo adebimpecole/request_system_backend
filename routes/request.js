@@ -17,7 +17,34 @@ const router = express.Router();
 
 // helpers
 
-const getActorId = (req) => req.user?.employee?.id || null;
+const resolveActor = async (req) => {
+  if (req.user?.employee?.id) {
+    const e = await Employee.findById(req.user.employee.id);
+    return e && {
+      type: "employee", id: String(e._id), email: e.email, role: e.role, department: e.department,
+      status: e.status, company_id: String(e.company_id), name: `${e.first_name} ${e.last_name}`,
+    };
+  }
+  if (req.user?.company?.id) {
+    const c = await Company.findById(req.user.company.id);
+    return c && {
+      type: "company", id: String(c._id), email: c.email, role: "admin", department: null,
+      status: "active", company_id: String(c._id), name: c.company_name,
+    };
+  }
+  return null;
+};
+
+// Shared membership checks for the request actions below
+const checkActor = (actor, request) => {
+  if (!actor || actor.company_id !== String(request.company_id)) {
+    return { status: 403, message: "You do not have access to this company's data" };
+  }
+  if (actor.status === "suspended") {
+    return { status: 403, message: "Your account has been suspended. Contact your organization admin." };
+  }
+  return null;
+};
 
 const getApprovers = async (company_id) =>
   Approvers.findOne({ company_id });
@@ -28,6 +55,9 @@ const notifyApproversByEmail = async (company_id, emailList, payload) => {
     company_id,
   }).select("_id");
   for (const emp of employees) notifyUser(String(emp._id), payload);
+  // The admin account can hold an approver seat too
+  const company = await Company.findOne({ _id: company_id, email: { $in: emailList } }).select("_id");
+  if (company) notifyUser(String(company._id), payload);
 };
 
 const getBudgetStatus = async (company_id) => {
@@ -43,9 +73,9 @@ const getBudgetStatus = async (company_id) => {
 const logRequestActivity = (request, actor, { action, message, metadata }) =>
   logActivity({
     company_id: request.company_id,
-    actor_id: actor._id,
-    actor_type: "employee",
-    actor_name: `${actor.first_name} ${actor.last_name}`,
+    actor_id: actor.id,
+    actor_type: actor.type,
+    actor_name: actor.name,
     action,
     target_type: "request",
     target_id: request.request_id,
@@ -78,16 +108,9 @@ router.post("/:request_id/approve", validate(schemas.approveRequest), async (req
       return res.status(400).json({ message: "Awaiting clarification from the requester first" });
     }
 
-    const actorId = getActorId(req);
-    if (!actorId) return res.status(403).json({ message: "Only employees can approve requests" });
-
-    const actor = await Employee.findById(actorId);
-    if (!actor || String(actor.company_id) !== String(request.company_id)) {
-      return res.status(403).json({ message: "You do not have access to this company's data" });
-    }
-    if (actor.status === "suspended") {
-      return res.status(403).json({ message: "Your account has been suspended. Contact your organization admin." });
-    }
+    const actor = await resolveActor(req);
+    const denied = checkActor(actor, request);
+    if (denied) return res.status(denied.status).json({ message: denied.message });
     const approversDoc = await getApprovers(request.company_id);
 
     const { approval_index } = request;
@@ -135,7 +158,7 @@ router.post("/:request_id/approve", validate(schemas.approveRequest), async (req
       await request.save();
       await logRequestActivity(request, actor, {
         action: "request.rejected",
-        message: `${actor.first_name} ${actor.last_name} rejected the request${note ? `: "${note}"` : "."}`,
+        message: `${actor.name} rejected the request${note ? `: "${note}"` : "."}`,
         metadata: { stage: approval_index, note: note || "" },
       });
       notifyUser(String(request.user_id), {
@@ -156,7 +179,7 @@ router.post("/:request_id/approve", validate(schemas.approveRequest), async (req
       await request.save();
       await logRequestActivity(request, actor, {
         action: "request.approved",
-        message: `${actor.first_name} ${actor.last_name} approved the initial department review.`,
+        message: `${actor.name} approved the initial department review.`,
         metadata: { stage: 0 },
       });
 
@@ -187,7 +210,7 @@ router.post("/:request_id/approve", validate(schemas.approveRequest), async (req
       await request.save();
       await logRequestActivity(request, actor, {
         action: "request.approved",
-        message: `${actor.first_name} ${actor.last_name} attached proof of delegated funds and forwarded the request to the department head.`,
+        message: `${actor.name} attached proof of delegated funds and forwarded the request to the department head.`,
         metadata: { stage: 1, proof },
       });
 
@@ -224,7 +247,7 @@ router.post("/:request_id/approve", validate(schemas.approveRequest), async (req
       await request.save();
       await logRequestActivity(request, actor, {
         action: "request.approved",
-        message: `${actor.first_name} ${actor.last_name} attached proof of fund use and forwarded the request for verification.`,
+        message: `${actor.name} attached proof of fund use and forwarded the request for verification.`,
         metadata: { stage: 2, proof },
       });
 
@@ -247,7 +270,7 @@ router.post("/:request_id/approve", validate(schemas.approveRequest), async (req
       await request.save();
       await logRequestActivity(request, actor, {
         action: "request.approved",
-        message: `${actor.first_name} ${actor.last_name} verified fund use — the request is now fully approved.`,
+        message: `${actor.name} verified fund use — the request is now fully approved.`,
         metadata: { stage: 3 },
       });
 
@@ -279,14 +302,9 @@ router.post("/:request_id/clarify", validate(schemas.clarifyRequest), async (req
       return res.status(400).json({ message: "Request is already finalised" });
     }
 
-    const actorId = getActorId(req);
-    const actor = await Employee.findById(actorId);
-    if (!actor || String(actor.company_id) !== String(request.company_id)) {
-      return res.status(403).json({ message: "You do not have access to this company's data" });
-    }
-    if (actor.status === "suspended") {
-      return res.status(403).json({ message: "Your account has been suspended. Contact your organization admin." });
-    }
+    const actor = await resolveActor(req);
+    const denied = checkActor(actor, request);
+    if (denied) return res.status(denied.status).json({ message: denied.message });
 
     const isDeptHead = actor.role === "department_head" && actor.department === request.department;
     const approversDoc = await getApprovers(request.company_id);
@@ -296,13 +314,13 @@ router.post("/:request_id/clarify", validate(schemas.clarifyRequest), async (req
       return res.status(403).json({ message: "Only the department head or verification approver can request clarification" });
     }
 
-    request.clarification.push({ question, asked_by: actor._id, asked_by_role: actor.role, asked_at: new Date() });
+    request.clarification.push({ question, asked_by: actor.id, asked_by_role: actor.role, asked_at: new Date() });
     request.pre_clarification_status = request.status;
     request.status = "clarification_needed";
     await request.save();
     await logRequestActivity(request, actor, {
       action: "request.clarification_requested",
-      message: `${actor.first_name} ${actor.last_name} requested clarification: "${question}"`,
+      message: `${actor.name} requested clarification: "${question}"`,
       metadata: { question },
     });
 
@@ -354,17 +372,12 @@ router.post("/:request_id/respond", validate(schemas.respondClarification), asyn
       return res.status(400).json({ message: "No clarification is pending for this request" });
     }
 
-    const actorId = getActorId(req);
-    const actor = await Employee.findById(actorId);
-    if (!actor || String(actor.company_id) !== String(request.company_id)) {
-      return res.status(403).json({ message: "You do not have access to this company's data" });
-    }
-    if (actor.status === "suspended") {
-      return res.status(403).json({ message: "Your account has been suspended. Contact your organization admin." });
-    }
+    const actor = await resolveActor(req);
+    const denied = checkActor(actor, request);
+    if (denied) return res.status(denied.status).json({ message: denied.message });
 
     const askedByDeptHead = pending.asked_by_role ? pending.asked_by_role === "department_head" : true;
-    const isRequester = String(request.user_id) === actorId;
+    const isRequester = String(request.user_id) === actor.id;
     const isDeptHead = actor.role === "department_head" && actor.department === request.department;
     const authorized = askedByDeptHead ? isRequester : isDeptHead;
 
@@ -385,7 +398,7 @@ router.post("/:request_id/respond", validate(schemas.respondClarification), asyn
     await request.save();
     await logRequestActivity(request, actor, {
       action: "request.clarification_responded",
-      message: `${actor.first_name} ${actor.last_name} responded to the clarification: "${response}"`,
+      message: `${actor.name} responded to the clarification: "${response}"`,
       metadata: { response },
     });
 
@@ -418,17 +431,12 @@ router.post("/:request_id/close", async (req, res) => {
       return res.status(400).json({ message: "This request can no longer be closed — funds have already been delegated." });
     }
 
-    const actorId = getActorId(req);
-    const actor = await Employee.findById(actorId);
-    if (!actor || String(actor.company_id) !== String(request.company_id)) {
-      return res.status(403).json({ message: "You do not have access to this company's data" });
-    }
-    if (actor.status === "suspended") {
-      return res.status(403).json({ message: "Your account has been suspended. Contact your organization admin." });
-    }
+    const actor = await resolveActor(req);
+    const denied = checkActor(actor, request);
+    if (denied) return res.status(denied.status).json({ message: denied.message });
 
-    const isRequester = String(request.user_id) === actorId;
-    const isDeptHead = actor?.role === "department_head" && actor.department === request.department;
+    const isRequester = String(request.user_id) === actor.id;
+    const isDeptHead = actor.role === "department_head" && actor.department === request.department;
 
     if (!isRequester && !isDeptHead) {
       return res.status(403).json({ message: "Only the requester or department head can close this request" });
@@ -436,11 +444,11 @@ router.post("/:request_id/close", async (req, res) => {
 
     request.status = "closed";
     request.closed_at = new Date();
-    request.closed_by = actor._id;
+    request.closed_by = actor.id;
     await request.save();
     await logRequestActivity(request, actor, {
       action: "request.closed",
-      message: `${actor.first_name} ${actor.last_name} closed the request.`,
+      message: `${actor.name} closed the request.`,
       metadata: {},
     });
 
@@ -483,6 +491,10 @@ router.use(loadActor);
 
 // create request
 router.post("/new_request", validate(schemas.newRequest), async (req, res) => {
+  // Requests are raised by employees; the admin account reviews and approves them
+  if (req.actor.type === "company") {
+    return res.status(403).json({ message: "Admins can't create requests. Ask an employee to submit it." });
+  }
   try {
     const request = {
       ...req.body,
